@@ -1,7 +1,8 @@
 import { Injectable, inject } from '@angular/core';
-import { BehaviorSubject, Observable } from 'rxjs';
+import { BehaviorSubject, Observable, Subject } from 'rxjs';
 import { Track } from '../models/track.model';
 import { PlaybackState } from '../models/playback-state.model';
+import { getApiBaseUrl } from './api-config';
 import { SignalRService } from './signalr.service';
 
 export interface SyncStatus {
@@ -50,6 +51,9 @@ export class AudioService {
   private readonly autoplayBlockedSubject = new BehaviorSubject<boolean>(false);
   public readonly autoplayBlocked$: Observable<boolean> = this.autoplayBlockedSubject.asObservable();
 
+  private readonly trackEndedSubject = new Subject<void>();
+  public readonly trackEnded$: Observable<void> = this.trackEndedSubject.asObservable();
+
   constructor() {
     this.initAudio();
   }
@@ -91,6 +95,7 @@ export class AudioService {
 
     this.audio.addEventListener('ended', () => {
       this.isPlayingSubject.next(false);
+      this.trackEndedSubject.next();
     });
 
     this.audio.addEventListener('error', (e) => {
@@ -107,21 +112,28 @@ export class AudioService {
     return this.audio;
   }
 
-  public loadTrack(track: Track, autoplay = false): void {
-    if (this.currentTrack?.id === track.id) {
-      return;
-    }
-
+  public loadTrack(track: Track, initialState?: PlaybackState): void {
+    const isDifferentTrack = this.currentTrack?.id !== track.id;
     this.currentTrack = track;
+
     const fullAudioUrl = track.audioUrl.startsWith('http')
       ? track.audioUrl
-      : `http://localhost:5000${track.audioUrl}`;
+      : `${getApiBaseUrl()}${track.audioUrl}`;
 
-    this.audio.src = fullAudioUrl;
-    this.audio.load();
+    if (isDifferentTrack || this.audio.src !== fullAudioUrl) {
+      this.audio.pause();
+      this.audio.src = fullAudioUrl;
+      this.safeSetCurrentTime(0);
+      this.currentTimeSubject.next(0);
+      this.durationSubject.next(track.duration || 0);
+      this.audio.load();
+    }
 
-    if (autoplay && this.currentPlaybackState?.isPlaying) {
-      this.syncPlayback(this.currentPlaybackState);
+    if (initialState) {
+      this.syncPlayback(initialState);
+    } else {
+      this.safeSetCurrentTime(0);
+      this.currentTimeSubject.next(0);
     }
   }
 
@@ -130,9 +142,11 @@ export class AudioService {
 
     if (!state.isPlaying) {
       this.audio.pause();
-      if (Math.abs(this.audio.currentTime - state.currentPosition) > 0.3) {
-        this.audio.currentTime = Math.max(0, state.currentPosition);
+      const targetPos = Math.max(0, state.currentPosition);
+      if (Math.abs(this.audio.currentTime - targetPos) > 0.3) {
+        this.safeSetCurrentTime(targetPos);
       }
+      this.currentTimeSubject.next(this.audio.currentTime);
       this.audio.playbackRate = 1.0;
       this.isPlayingSubject.next(false);
       return;
@@ -144,7 +158,7 @@ export class AudioService {
 
     // Direct seek if large difference (> 1.2s)
     if (Math.abs(diff) > 1.2) {
-      this.audio.currentTime = Math.max(0, expectedPosition);
+      this.safeSetCurrentTime(Math.max(0, expectedPosition));
       this.audio.playbackRate = 1.0;
     } else if (Math.abs(diff) > 0.05) {
       // Micro-adjust playbackRate for smooth catchup
@@ -166,10 +180,39 @@ export class AudioService {
     }
   }
 
+  private safeSetCurrentTime(seconds: number): void {
+    try {
+      if (this.audio.readyState >= 1) {
+        this.audio.currentTime = Math.max(0, seconds);
+      } else {
+        const onLoaded = () => {
+          try {
+            this.audio.currentTime = Math.max(0, seconds);
+          } catch {}
+        };
+        this.audio.addEventListener('loadedmetadata', onLoaded, { once: true });
+      }
+    } catch {
+      try {
+        this.audio.currentTime = Math.max(0, seconds);
+      } catch {}
+    }
+  }
+
   public userInteractedEnableAudio(): void {
     this.autoplayBlockedSubject.next(false);
     if (this.currentPlaybackState?.isPlaying) {
       this.syncPlayback(this.currentPlaybackState);
+    } else {
+      // Prime audio element for mobile browsers so future plays from SignalR won't be blocked
+      try {
+        const p = this.audio.play();
+        if (p !== undefined) {
+          p.then(() => {
+            this.audio.pause();
+          }).catch(() => {});
+        }
+      } catch {}
     }
   }
 

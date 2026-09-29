@@ -1,7 +1,7 @@
-import { Component, inject } from '@angular/core';
+import { Component, inject, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { Router } from '@angular/router';
+import { ActivatedRoute, Router } from '@angular/router';
 import { RoomService } from '../../core/services/room.service';
 import { UserService } from '../../core/services/user.service';
 import { AudioDeviceService } from '../../core/services/audio-device.service';
@@ -401,8 +401,9 @@ import { FooterComponent } from '../../shared/components/footer/footer.component
     }
   `]
 })
-export class HomeComponent {
+export class HomeComponent implements OnInit {
   private readonly router = inject(Router);
+  private readonly route = inject(ActivatedRoute);
   private readonly roomService = inject(RoomService);
   private readonly userService = inject(UserService);
   private readonly audioDeviceService = inject(AudioDeviceService);
@@ -420,6 +421,14 @@ export class HomeComponent {
     this.audioDeviceService.useNativeSpeakers$.subscribe(val => {
       this.useNativeSpeakers = val;
     });
+  }
+
+  ngOnInit(): void {
+    const codeParam = this.route.snapshot.queryParamMap.get('code');
+    if (codeParam && codeParam.trim().length === 6) {
+      this.roomCode = codeParam.trim().toUpperCase();
+      this.joinRoom();
+    }
   }
 
   onRoomCodeInput(event: Event): void {

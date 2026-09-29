@@ -5,13 +5,16 @@ import { Room, CreateRoomRequest, JoinRoomRequest } from '../models/room.model';
 import { RoomState } from '../models/room-state.model';
 import { Participant } from '../models/participant.model';
 import { Track } from '../models/track.model';
+import { getApiBaseUrl } from './api-config';
 
 @Injectable({
   providedIn: 'root'
 })
 export class RoomService {
   private readonly http = inject(HttpClient);
-  private readonly baseUrl = 'http://localhost:5000';
+  private get baseUrl(): string {
+    return getApiBaseUrl();
+  }
 
   getApiUrl(): string {
     return this.baseUrl;

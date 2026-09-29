@@ -43,17 +43,12 @@ builder.Services.AddSignalR(options =>
     options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
 });
 
-// Configure CORS for Angular Frontend
+// Configure CORS for Angular Frontend & Mobile Devices
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAngularDev", policy =>
     {
-        policy.WithOrigins(
-                "http://localhost:4200",
-                "http://127.0.0.1:4200",
-                "https://localhost:4200",
-                "http://localhost:3000"
-            )
+        policy.SetIsOriginAllowed(_ => true)
             .AllowAnyHeader()
             .AllowAnyMethod()
             .AllowCredentials();
@@ -82,6 +77,7 @@ app.UseAuthorization();
 
 app.MapControllers();
 app.MapHub<RoomHub>("/hubs/room");
+app.MapFallbackToFile("index.html");
 
 // Initialize Database & Seed initial audio tracks
 using (var scope = app.Services.CreateScope())

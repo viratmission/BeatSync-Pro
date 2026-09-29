@@ -5,6 +5,7 @@ import { Participant } from '../models/participant.model';
 import { RoomState } from '../models/room-state.model';
 import { PlaybackState } from '../models/playback-state.model';
 import { Track } from '../models/track.model';
+import { getApiBaseUrl } from './api-config';
 
 export type HubConnectionStatus = 'connected' | 'connecting' | 'reconnecting' | 'disconnected';
 
@@ -13,7 +14,9 @@ export type HubConnectionStatus = 'connected' | 'connecting' | 'reconnecting' | 
 })
 export class SignalRService {
   private hubConnection: signalR.HubConnection | null = null;
-  private readonly hubUrl = 'http://localhost:5000/hubs/room';
+  private get hubUrl(): string {
+    return `${getApiBaseUrl()}/hubs/room`;
+  }
 
   private clockOffset = 0; // serverTime - clientTime
   private rtt = 0; // Round trip time in ms
@@ -172,19 +175,19 @@ export class SignalRService {
     }
   }
 
-  public async play(roomCode: string, position: number): Promise<void> {
+  public async play(roomCode: string, position: number, trackId?: number): Promise<void> {
     if (!this.isConnected) return;
-    await this.hubConnection!.invoke('Play', roomCode, position);
+    await this.hubConnection!.invoke('Play', roomCode, position, trackId ?? null);
   }
 
-  public async pause(roomCode: string, position: number): Promise<void> {
+  public async pause(roomCode: string, position: number, trackId?: number): Promise<void> {
     if (!this.isConnected) return;
-    await this.hubConnection!.invoke('Pause', roomCode, position);
+    await this.hubConnection!.invoke('Pause', roomCode, position, trackId ?? null);
   }
 
-  public async seek(roomCode: string, position: number): Promise<void> {
+  public async seek(roomCode: string, position: number, trackId?: number): Promise<void> {
     if (!this.isConnected) return;
-    await this.hubConnection!.invoke('Seek', roomCode, position);
+    await this.hubConnection!.invoke('Seek', roomCode, position, trackId ?? null);
   }
 
   public async changeTrack(roomCode: string, trackId: number): Promise<void> {

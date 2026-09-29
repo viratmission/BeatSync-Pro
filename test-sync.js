@@ -58,7 +58,15 @@ async function testSync() {
   await listenerConn.start();
   console.log('Listener connected to SignalR Hub.');
 
-  const roomCode = '6BRGEM';
+  // Dynamically create a test room
+  const createRes = await fetch('http://localhost:5000/api/rooms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hostUsername: 'productive-eagle', name: 'Test Sync Room' })
+  });
+  const roomData = await createRes.json();
+  const roomCode = roomData.roomCode;
+  console.log(`Created test room: ${roomCode}`);
 
   // Host joins
   const hostState = await hostConn.invoke('JoinRoom', roomCode, 'productive-eagle');
@@ -73,12 +81,12 @@ async function testSync() {
 
   // Host triggers Play
   console.log('Host triggering PLAY at 5.0 seconds...');
-  await hostConn.invoke('Play', roomCode, 5.0);
+  await hostConn.invoke('Play', roomCode, 5.0, 1);
   await new Promise(r => setTimeout(r, 600));
 
   // Host triggers Seek
   console.log('Host triggering SEEK to 22.5 seconds...');
-  await hostConn.invoke('Seek', roomCode, 22.5);
+  await hostConn.invoke('Seek', roomCode, 22.5, 1);
   await new Promise(r => setTimeout(r, 600));
 
   // Host triggers ChangeTrack

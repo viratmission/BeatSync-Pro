@@ -15,6 +15,7 @@ import { Room } from '../../core/models/room.model';
 import { Participant } from '../../core/models/participant.model';
 import { Track } from '../../core/models/track.model';
 import { PlaybackState } from '../../core/models/playback-state.model';
+import { getApiBaseUrl } from '../../core/services/api-config';
 
 @Component({
   selector: 'app-room',
@@ -878,6 +879,17 @@ export class RoomComponent implements OnInit, OnDestroy {
     this.initSignalRSubscriptions();
     this.initAudioDeviceSubscriptions();
     this.connectAndJoin();
+
+    // Auto-unlock and prime audio on the first user interaction anywhere on the device
+    const unlockOnce = () => {
+      this.audioService.userInteractedEnableAudio();
+      window.removeEventListener('click', unlockOnce);
+      window.removeEventListener('touchstart', unlockOnce);
+      window.removeEventListener('pointerdown', unlockOnce);
+    };
+    window.addEventListener('click', unlockOnce, { once: true });
+    window.addEventListener('touchstart', unlockOnce, { once: true });
+    window.addEventListener('pointerdown', unlockOnce, { once: true });
   }
 
   ngOnDestroy(): void {
@@ -985,9 +997,14 @@ export class RoomComponent implements OnInit, OnDestroy {
 
     this.subscriptions.add(
       this.signalRService.trackChanged$.subscribe(({ track, state }) => {
+        if (!this.availableTracks.some(t => t.id === track.id)) {
+          this.availableTracks = [...this.availableTracks, track];
+        }
         this.currentTrack = track;
         this.playbackState = state;
-        this.audioService.loadTrack(track, true);
+        this.currentTime = 0;
+        this.duration = track.duration || 0;
+        this.audioService.loadTrack(track, state);
         this.toastService.info(`Track changed to "${track.title}"`);
       })
     );
@@ -1041,10 +1058,9 @@ export class RoomComponent implements OnInit, OnDestroy {
 
     if (state.currentTrack) {
       this.currentTrack = state.currentTrack;
-      this.audioService.loadTrack(state.currentTrack);
-      if (this.playbackState?.isPlaying) {
-        this.audioService.syncPlayback(this.playbackState);
-      }
+      this.currentTime = state.playbackState?.currentPosition ?? 0;
+      this.duration = state.currentTrack.duration || 0;
+      this.audioService.loadTrack(state.currentTrack, state.playbackState);
     }
   }
 
@@ -1053,9 +1069,9 @@ export class RoomComponent implements OnInit, OnDestroy {
     if (!this.isHost) return;
 
     if (this.isPlaying) {
-      await this.signalRService.pause(this.roomCode, this.currentTime);
+      await this.signalRService.pause(this.roomCode, this.currentTime, this.currentTrack?.id);
     } else {
-      await this.signalRService.play(this.roomCode, this.currentTime);
+      await this.signalRService.play(this.roomCode, this.currentTime, this.currentTrack?.id);
     }
   }
 
@@ -1068,7 +1084,7 @@ export class RoomComponent implements OnInit, OnDestroy {
     const clickRatio = Math.max(0, Math.min(1, clickX / rect.width));
     const seekTime = clickRatio * this.duration;
 
-    await this.signalRService.seek(this.roomCode, seekTime);
+    await this.signalRService.seek(this.roomCode, seekTime, this.currentTrack?.id);
   }
 
   async previousTrack(): Promise<void> {
@@ -1076,6 +1092,7 @@ export class RoomComponent implements OnInit, OnDestroy {
 
     const currentIndex = this.availableTracks.findIndex(t => t.id === this.currentTrack?.id);
     const prevIndex = (currentIndex - 1 + this.availableTracks.length) % this.availableTracks.length;
+    this.currentTime = 0;
     await this.signalRService.changeTrack(this.roomCode, this.availableTracks[prevIndex].id);
   }
 
@@ -1084,6 +1101,7 @@ export class RoomComponent implements OnInit, OnDestroy {
 
     const currentIndex = this.availableTracks.findIndex(t => t.id === this.currentTrack?.id);
     const nextIndex = (currentIndex + 1) % this.availableTracks.length;
+    this.currentTime = 0;
     await this.signalRService.changeTrack(this.roomCode, this.availableTracks[nextIndex].id);
   }
 
@@ -1091,6 +1109,7 @@ export class RoomComponent implements OnInit, OnDestroy {
     if (!this.isHost) return;
     const trackId = Number(trackIdStr);
     if (!isNaN(trackId) && trackId !== this.currentTrack?.id) {
+      this.currentTime = 0;
       await this.signalRService.changeTrack(this.roomCode, trackId);
     }
   }
@@ -1143,15 +1162,35 @@ export class RoomComponent implements OnInit, OnDestroy {
     this.router.navigate(['/']);
   }
 
-  copyInviteLink(): void {
-    const url = window.location.href;
-    navigator.clipboard.writeText(url).then(() => {
-      this.toastService.success('Invite link copied to clipboard!');
-    });
+  async copyInviteLink(): Promise<void> {
+    const directUrl = `${window.location.origin}/room/${this.roomCode}`;
+    const shareData = {
+      title: 'Join my BeatSync Room!',
+      text: `Listen in sync together on BeatSync! Room code: ${this.roomCode}`,
+      url: directUrl
+    };
+
+    if (typeof navigator !== 'undefined' && navigator.share && navigator.canShare && navigator.canShare(shareData)) {
+      try {
+        await navigator.share(shareData);
+        return;
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          console.warn('Share error:', err);
+        }
+      }
+    }
+
+    try {
+      await navigator.clipboard.writeText(directUrl);
+      this.toastService.success(`Room link copied! (${this.roomCode})`);
+    } catch {
+      prompt('Copy room link:', directUrl);
+    }
   }
 
   getArtworkUrl(url: string): string {
-    return url.startsWith('http') ? url : `http://localhost:5000${url}`;
+    return url.startsWith('http') ? url : `${getApiBaseUrl()}${url}`;
   }
 
   formatTime(seconds: number): string {

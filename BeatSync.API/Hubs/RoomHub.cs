@@ -105,39 +105,39 @@ public class RoomHub : Hub
         }
     }
 
-    public async Task Play(string roomCode, double position)
+    public async Task Play(string roomCode, double position, int? trackId)
     {
         var normalizedCode = roomCode.Trim().ToUpper();
         await AssertIsHostAsync(normalizedCode);
 
         var participant = await _participantService.GetParticipantByConnectionIdAsync(Context.ConnectionId);
-        var state = _syncService.Play(normalizedCode, position, participant?.Username);
+        var state = _syncService.Play(normalizedCode, position, trackId, participant?.Username);
 
-        _logger.LogInformation("Room {RoomCode} PLAY triggered at {Position}s by {Host}", normalizedCode, position, participant?.Username);
+        _logger.LogInformation("Room {RoomCode} PLAY triggered at {Position}s (Track {TrackId}) by {Host}", normalizedCode, position, state.TrackId, participant?.Username);
         await Clients.Group(normalizedCode).SendAsync("PlaybackStateChanged", state);
     }
 
-    public async Task Pause(string roomCode, double position)
+    public async Task Pause(string roomCode, double position, int? trackId)
     {
         var normalizedCode = roomCode.Trim().ToUpper();
         await AssertIsHostAsync(normalizedCode);
 
         var participant = await _participantService.GetParticipantByConnectionIdAsync(Context.ConnectionId);
-        var state = _syncService.Pause(normalizedCode, position, participant?.Username);
+        var state = _syncService.Pause(normalizedCode, position, trackId, participant?.Username);
 
-        _logger.LogInformation("Room {RoomCode} PAUSE triggered at {Position}s by {Host}", normalizedCode, position, participant?.Username);
+        _logger.LogInformation("Room {RoomCode} PAUSE triggered at {Position}s (Track {TrackId}) by {Host}", normalizedCode, position, state.TrackId, participant?.Username);
         await Clients.Group(normalizedCode).SendAsync("PlaybackStateChanged", state);
     }
 
-    public async Task Seek(string roomCode, double position)
+    public async Task Seek(string roomCode, double position, int? trackId)
     {
         var normalizedCode = roomCode.Trim().ToUpper();
         await AssertIsHostAsync(normalizedCode);
 
         var participant = await _participantService.GetParticipantByConnectionIdAsync(Context.ConnectionId);
-        var state = _syncService.Seek(normalizedCode, position, participant?.Username);
+        var state = _syncService.Seek(normalizedCode, position, trackId, participant?.Username);
 
-        _logger.LogInformation("Room {RoomCode} SEEK to {Position}s by {Host}", normalizedCode, position, participant?.Username);
+        _logger.LogInformation("Room {RoomCode} SEEK to {Position}s (Track {TrackId}) by {Host}", normalizedCode, position, state.TrackId, participant?.Username);
         await Clients.Group(normalizedCode).SendAsync("SeekChanged", position, state.ServerTimestamp);
         await Clients.Group(normalizedCode).SendAsync("PlaybackStateChanged", state);
     }
@@ -158,6 +158,7 @@ public class RoomHub : Hub
 
         _logger.LogInformation("Room {RoomCode} Track changed to {TrackTitle} by {Host}", normalizedCode, track.Title, participant?.Username);
         await Clients.Group(normalizedCode).SendAsync("TrackChanged", track, state);
+        await Clients.Group(normalizedCode).SendAsync("PlaybackStateChanged", state);
     }
 
     public Task<long> GetServerTime()
