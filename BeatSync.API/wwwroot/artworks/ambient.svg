@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="100%" height="100%">
+  <defs>
+    <radialGradient id="amb" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#06b6d4" />
+      <stop offset="60%" stop-color="#0369a1" />
+      <stop offset="100%" stop-color="#0f172a" />
+    </radialGradient>
+  </defs>
+  <rect width="400" height="400" rx="16" fill="url(#amb)" />
+  <circle cx="200" cy="200" r="100" fill="none" stroke="#67e8f9" stroke-width="2" opacity="0.4" />
+  <circle cx="200" cy="200" r="70" fill="none" stroke="#38bdf8" stroke-width="2" opacity="0.6" />
+  <circle cx="200" cy="200" r="40" fill="none" stroke="#e0f2fe" stroke-width="2" opacity="0.8" />
+  <circle cx="200" cy="200" r="12" fill="#e0f2fe" />
+  <text x="200" y="350" font-family="system-ui, sans-serif" font-weight="700" font-size="16" fill="#bae6fd" text-anchor="middle" letter-spacing="3">AMBIENT PULSE</text>
+</svg>
