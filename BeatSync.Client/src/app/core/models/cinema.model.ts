@@ -59,6 +59,11 @@ export interface DeviceSyncReport {
   playbackRate: number;
   syncStatus: 'Excellent' | 'Good' | 'Realigning' | 'Desynced';
   lastSyncTime?: number;
+  webRtcState?: string;
+  iceState?: string;
+  audioTrackReceived?: boolean;
+  audioPlaybackActive?: boolean;
+  audioAutoplayBlocked?: boolean;
 }
 
 export interface WebRtcSignal {

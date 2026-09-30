@@ -39,6 +39,27 @@ public class CinemaController : ControllerBase
         });
     }
 
+    [HttpGet("ice-servers")]
+    public ActionResult<IEnumerable<IceServerDto>> GetIceServers([FromServices] IConfiguration config)
+    {
+        var servers = config.GetSection("WebRtc:IceServers").Get<List<IceServerDto>>();
+        if (servers == null || servers.Count == 0)
+        {
+            servers = new List<IceServerDto>
+            {
+                new IceServerDto { Urls = new[] { "stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302", "stun:stun.cloudflare.com:3478" } }
+            };
+        }
+        return Ok(servers);
+    }
+
+    [HttpGet("log-ice")]
+    public IActionResult LogIce([FromQuery] string msg)
+    {
+        _logger.LogWarning("ICE_DIAG: {Msg}", msg);
+        return Ok();
+    }
+
     [HttpPost("rooms/{roomCode}/media")]
     public async Task<ActionResult<RoomDto>> SetRoomMedia(string roomCode, [FromBody] SetMediaRequest request)
     {
@@ -152,4 +173,11 @@ public class SetMediaRequest
     public required string Title { get; set; }
     public double Duration { get; set; }
     public string? Username { get; set; }
+}
+
+public class IceServerDto
+{
+    public string[]? Urls { get; set; }
+    public string? Username { get; set; }
+    public string? Credential { get; set; }
 }

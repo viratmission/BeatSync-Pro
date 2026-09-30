@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head><title>Test ICE</title></head>
+<body>
+<h1>ICE Gathering Test</h1>
+<div id="output"></div>
+<script>
+async function run() {
+  const results = [];
+  function log(msg) {
+    console.log(msg);
+    results.push(msg);
+    document.getElementById('output').innerHTML += '<div>' + msg + '</div>';
+    fetch('/api/cinema/log-ice?msg=' + encodeURIComponent(msg)).catch(() => {});
+  }
+
+  try {
+    const res = await fetch('/api/cinema/ice-servers');
+    const iceServers = await res.json();
+    log('Fetched ' + iceServers.length + ' ice server configs: ' + JSON.stringify(iceServers));
+
+    const pc = new RTCPeerConnection({ iceServers });
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        log('CANDIDATE: type=' + e.candidate.type + ' proto=' + e.candidate.protocol + ' address=' + e.candidate.address + ' port=' + e.candidate.port + ' cand=' + e.candidate.candidate);
+      } else {
+        log('ICE_GATHERING_COMPLETE');
+      }
+    };
+
+    pc.onicecandidateerror = (e) => {
+      log('ICE_ERROR: url=' + e.url + ' err=' + e.errorCode + ' txt=' + e.errorText);
+    };
+
+    pc.createDataChannel('test');
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    log('Offer created successfully');
+  } catch (err) {
+    log('EXCEPTION: ' + err.message);
+  }
+}
+run();
+</script>
+</body>
+</html>

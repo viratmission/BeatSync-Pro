@@ -5,7 +5,7 @@ import { ActivatedRoute, Router } from '@angular/router';
 import { Subscription } from 'rxjs';
 import { RoomService } from '../../core/services/room.service';
 import { SignalRService, HubConnectionStatus } from '../../core/services/signalr.service';
-import { CinemaService } from '../../core/services/cinema.service';
+import { CinemaService, PeerDiagnostics } from '../../core/services/cinema.service';
 import { UserService } from '../../core/services/user.service';
 import { ToastService } from '../../core/services/toast.service';
 import { Room } from '../../core/models/room.model';
@@ -71,8 +71,9 @@ import { DEVICE_POSITIONS, DevicePosition, DeviceSyncReport } from '../../core/m
                 (timeupdate)="onVideoTimeUpdate()"
                 (loadedmetadata)="onVideoLoadedMetadata()"
                 (ended)="onVideoEnded()"
+                (play)="onVideoPlay()"
+                (pause)="onVideoPause()"
                 playsinline
-                crossorigin="anonymous"
               ></video>
 
               <!-- Empty State / File Picker Overlay if no video selected -->
@@ -309,6 +310,31 @@ import { DEVICE_POSITIONS, DevicePosition, DeviceSyncReport } from '../../core/m
                     </div>
                   </div>
 
+                  <!-- Deep Media Diagnostics (Section 22 of prompt) -->
+                  <div class="pipeline-diagnostics-bar">
+                    <span class="p-diag" [ngClass]="getPhoneSignalRStatus(phone)">
+                      SigR: {{ getPhoneSignalRText(phone) }}
+                    </span>
+                    <span class="p-diag" [ngClass]="getPhoneWebRtcStatus(phone)">
+                      WebRTC: {{ getPhoneWebRtcText(phone) }}
+                    </span>
+                    <span class="p-diag" [ngClass]="getPhoneIceStatus(phone)">
+                      ICE: {{ getPhoneIceText(phone) }}
+                    </span>
+                    <span class="p-diag" [ngClass]="getPhoneTrackStatus(phone)">
+                      Track: {{ getPhoneTrackText(phone) }}
+                    </span>
+                    <span class="p-diag" [ngClass]="getPhonePlaybackStatus(phone)">
+                      Audio: {{ getPhonePlaybackText(phone) }}
+                    </span>
+                  </div>
+
+                  @if (getPhoneIceText(phone).includes('Checking') || getPhoneWebRtcText(phone).includes('failed')) {
+                    <div class="cell-nat-hint">
+                      💡 <b>Cellular NAT detected:</b> Phone is on 4G mobile data. Connect phone to the <b>same Wi-Fi</b> as the laptop (or turn on Laptop Hotspot) for instant zero-latency direct audio!
+                    </div>
+                  }
+
                   <!-- Host Control: Change Position or Volume of Phone -->
                   <div class="phone-actions-row">
                     <select
@@ -330,6 +356,10 @@ import { DEVICE_POSITIONS, DevicePosition, DeviceSyncReport } from '../../core/m
                       (ngModelChange)="onAdjustPhoneVolume(phone, $event)"
                       title="Adjust speaker volume"
                     />
+
+                    <button class="btn-reconnect-audio" (click)="reconnectPhone(phone)" title="Force re-negotiate audio track">
+                      ⚡ Reconnect
+                    </button>
                   </div>
                 </div>
               }
@@ -973,6 +1003,59 @@ import { DEVICE_POSITIONS, DevicePosition, DeviceSyncReport } from '../../core/m
     .mini-vol-slider {
       width: 70px;
     }
+    .pipeline-diagnostics-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      padding: 5px 8px;
+      background: #040711;
+      border-radius: 6px;
+      border: 1px solid #1e293b;
+      font-size: 9px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .p-diag {
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-weight: 700;
+    }
+    .p-diag.ok {
+      background: rgba(16, 185, 129, 0.15);
+      color: #10b981;
+    }
+    .p-diag.pending {
+      background: rgba(245, 158, 11, 0.15);
+      color: #f59e0b;
+    }
+    .p-diag.err {
+      background: rgba(239, 68, 68, 0.2);
+      color: #ef4444;
+    }
+    .cell-nat-hint {
+      background: rgba(234, 179, 8, 0.1);
+      border: 1px solid rgba(234, 179, 8, 0.25);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 10px;
+      color: #fde047;
+      line-height: 1.35;
+    }
+    .btn-reconnect-audio {
+      background: rgba(56, 189, 248, 0.15);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      color: #38bdf8;
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+    .btn-reconnect-audio:hover {
+      background: rgba(56, 189, 248, 0.3);
+      color: #ffffff;
+    }
     @media (max-width: 1080px) {
       .cinema-main-stage {
         grid-template-columns: 1fr;
@@ -996,6 +1079,7 @@ export class CinemaHostComponent implements OnInit, OnDestroy {
   room: Room | null = null;
   participants: Participant[] = [];
   deviceReports = new Map<string, DeviceSyncReport>();
+  peerDiagnostics = new Map<string, PeerDiagnostics>();
 
   videoSrc = '';
   mediaTitle = '';
@@ -1095,6 +1179,12 @@ export class CinemaHostComponent implements OnInit, OnDestroy {
         this.deviceReports = reports;
       })
     );
+
+    this.subscriptions.add(
+      this.cinemaService.peerDiagnostics$.subscribe(diags => {
+        this.peerDiagnostics = diags;
+      })
+    );
   }
 
   private async connectHost(): Promise<void> {
@@ -1121,6 +1211,7 @@ export class CinemaHostComponent implements OnInit, OnDestroy {
   // --- Video File Selection & Demo Loading ---
 
   onFileSelected(event: Event): void {
+    this.cinemaService.resumeAudioContext();
     const input = event.target as HTMLInputElement;
     if (input.files && input.files[0]) {
       const file = input.files[0];
@@ -1129,15 +1220,16 @@ export class CinemaHostComponent implements OnInit, OnDestroy {
 
       this.toastService.success(`Loaded video: "${this.mediaTitle}"`);
 
-      // Notify room of loaded media
+      // Notify room of loaded media & attach capture
       setTimeout(() => {
         this.setupAudioCapture();
         this.broadcastCommand('LoadMedia', 0);
-      }, 300);
+      }, 200);
     }
   }
 
   loadDemoCinemaMedia(): void {
+    this.cinemaService.resumeAudioContext();
     this.mediaTitle = 'Cinema Surround Sound Test Film';
     // Use procedural cinema audio demo
     this.videoSrc = this.roomService.getCinemaAudioStreamUrl(this.roomCode);
@@ -1146,12 +1238,13 @@ export class CinemaHostComponent implements OnInit, OnDestroy {
     setTimeout(() => {
       this.setupAudioCapture();
       this.broadcastCommand('LoadMedia', 0);
-    }, 300);
+    }, 200);
   }
 
   private setupAudioCapture(): void {
     if (this.videoElementRef?.nativeElement) {
       const video = this.videoElementRef.nativeElement;
+      video.volume = 1.0;
       this.cinemaService.attachVideoAudioSource(video);
 
       // Connect WebRTC to all already connected phones
@@ -1165,20 +1258,37 @@ export class CinemaHostComponent implements OnInit, OnDestroy {
 
   // --- Master Cinema Playback Controls ---
 
+  onVideoPlay(): void {
+    this.cinemaService.resumeAudioContext();
+    this.setupAudioCapture();
+    if (!this.isPlaying) {
+      this.isPlaying = true;
+      const video = this.videoElementRef?.nativeElement;
+      if (video) {
+        this.broadcastCommand('Play', video.currentTime);
+      }
+    }
+  }
+
+  onVideoPause(): void {
+    if (this.isPlaying) {
+      this.isPlaying = false;
+      const video = this.videoElementRef?.nativeElement;
+      if (video) {
+        this.broadcastCommand('Pause', video.currentTime);
+      }
+    }
+  }
+
   togglePlayPause(): void {
     if (!this.videoElementRef?.nativeElement || !this.videoSrc) return;
+    this.cinemaService.resumeAudioContext();
     const video = this.videoElementRef.nativeElement;
 
     if (this.isPlaying) {
       video.pause();
-      this.isPlaying = false;
-      this.broadcastCommand('Pause', video.currentTime);
     } else {
-      video.play().then(() => {
-        this.isPlaying = true;
-        this.setupAudioCapture();
-        this.broadcastCommand('Play', video.currentTime);
-      }).catch(err => {
+      video.play().catch(err => {
         console.warn('Host play error:', err);
       });
     }
@@ -1215,6 +1325,7 @@ export class CinemaHostComponent implements OnInit, OnDestroy {
     if (this.videoElementRef?.nativeElement) {
       this.videoElementRef.nativeElement.volume = this.hostVolume / 100;
     }
+    this.cinemaService.setHostVolume(this.hostVolume);
   }
 
   onVideoTimeUpdate(): void {
@@ -1226,7 +1337,8 @@ export class CinemaHostComponent implements OnInit, OnDestroy {
   onVideoLoadedMetadata(): void {
     if (this.videoElementRef?.nativeElement) {
       this.duration = this.videoElementRef.nativeElement.duration;
-      this.videoElementRef.nativeElement.volume = this.hostVolume / 100;
+      this.videoElementRef.nativeElement.volume = 1.0;
+      this.cinemaService.setHostVolume(this.hostVolume);
     }
   }
 
@@ -1309,6 +1421,14 @@ export class CinemaHostComponent implements OnInit, OnDestroy {
     });
   }
 
+  reconnectPhone(phone: Participant): void {
+    if (phone.connectionId) {
+      this.toastService.info(`Re-establishing audio to ${phone.deviceName || phone.username}...`);
+      this.setupAudioCapture();
+      this.cinemaService.reconnectPhoneSpeaker(phone.connectionId, this.roomCode, true);
+    }
+  }
+
   async copyInviteLink(): Promise<void> {
     const url = `${window.location.origin}/cinema/device/${this.roomCode}`;
     const shareData = {
@@ -1346,5 +1466,76 @@ export class CinemaHostComponent implements OnInit, OnDestroy {
     const secs = Math.floor(seconds % 60);
     const pad = (n: number) => n.toString().padStart(2, '0');
     return `${pad(hrs)}:${pad(mins)}:${pad(secs)}`;
+  }
+
+  // --- Real-time Pipeline Diagnostics Helpers (Section 22 of prompt) ---
+
+  getPhoneSignalRStatus(phone: Participant): string {
+    return phone.isConnected ? 'ok' : 'err';
+  }
+  getPhoneSignalRText(phone: Participant): string {
+    return phone.isConnected ? 'Connected ✅' : 'Disconnected ❌';
+  }
+
+  getPhoneWebRtcStatus(phone: Participant): string {
+    const report = phone.connectionId ? this.deviceReports.get(phone.connectionId) : null;
+    const diag = phone.connectionId ? this.peerDiagnostics.get(phone.connectionId) : null;
+    const state = diag?.connectionState || report?.webRtcState;
+    if (state === 'connected') return 'ok';
+    if (state === 'connecting') return 'pending';
+    if (state === 'failed') return 'err';
+    return 'pending';
+  }
+  getPhoneWebRtcText(phone: Participant): string {
+    const report = phone.connectionId ? this.deviceReports.get(phone.connectionId) : null;
+    const diag = phone.connectionId ? this.peerDiagnostics.get(phone.connectionId) : null;
+    const state = diag?.connectionState || report?.webRtcState;
+    if (state === 'connected') return 'Connected ✅';
+    if (state === 'connecting') return 'Connecting ⏳';
+    if (state === 'failed') return 'Failed ❌';
+    return state ? state.toUpperCase() : 'INIT ⏳';
+  }
+
+  getPhoneIceStatus(phone: Participant): string {
+    const report = phone.connectionId ? this.deviceReports.get(phone.connectionId) : null;
+    const diag = phone.connectionId ? this.peerDiagnostics.get(phone.connectionId) : null;
+    const ice = diag?.iceState || report?.iceState;
+    if (ice === 'connected' || ice === 'completed') return 'ok';
+    if (ice === 'checking') return 'pending';
+    if (ice === 'failed' || ice === 'disconnected') return 'err';
+    return 'pending';
+  }
+  getPhoneIceText(phone: Participant): string {
+    const report = phone.connectionId ? this.deviceReports.get(phone.connectionId) : null;
+    const diag = phone.connectionId ? this.peerDiagnostics.get(phone.connectionId) : null;
+    const ice = diag?.iceState || report?.iceState;
+    if (ice === 'connected' || ice === 'completed') return 'Connected ✅';
+    if (ice === 'checking') return 'Checking ⏳';
+    if (ice === 'failed') return 'Failed ❌';
+    return ice ? ice.toUpperCase() : 'INIT ⏳';
+  }
+
+  getPhoneTrackStatus(phone: Participant): string {
+    const report = phone.connectionId ? this.deviceReports.get(phone.connectionId) : null;
+    if (report?.audioTrackReceived) return 'ok';
+    return 'pending';
+  }
+  getPhoneTrackText(phone: Participant): string {
+    const report = phone.connectionId ? this.deviceReports.get(phone.connectionId) : null;
+    if (report?.audioTrackReceived) return 'Active 🔊';
+    return 'Waiting ⏳';
+  }
+
+  getPhonePlaybackStatus(phone: Participant): string {
+    const report = phone.connectionId ? this.deviceReports.get(phone.connectionId) : null;
+    if (report?.audioAutoplayBlocked) return 'err';
+    if (report?.audioPlaybackActive) return 'ok';
+    return 'pending';
+  }
+  getPhonePlaybackText(phone: Participant): string {
+    const report = phone.connectionId ? this.deviceReports.get(phone.connectionId) : null;
+    if (report?.audioAutoplayBlocked) return 'Blocked 🔇 (Tap to unlock)';
+    if (report?.audioPlaybackActive) return 'Playing 🔊';
+    return 'Standby ⏸️';
   }
 }

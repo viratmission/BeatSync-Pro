@@ -4,6 +4,7 @@ import { SignalRService } from './signalr.service';
 import { RoomService } from './room.service';
 import { AudioDeviceService } from './audio-device.service';
 import { ToastService } from './toast.service';
+import { getApiBaseUrl } from './api-config';
 import {
   CinemaPlaybackCommand,
   DevicePosition,
@@ -23,6 +24,19 @@ export interface CinemaSyncState {
   playbackRate: number;
   syncQuality: 'Excellent' | 'Good' | 'Realigning' | 'Desynced';
   isWebRtcStreaming: boolean;
+  webRtcState?: string;
+  iceState?: string;
+  audioTrackReceived?: boolean;
+  audioPlaybackActive?: boolean;
+  audioAutoplayBlocked?: boolean;
+}
+
+export interface PeerDiagnostics {
+  connectionId: string;
+  connectionState: RTCPeerConnectionState;
+  iceState: RTCIceConnectionState;
+  hasTrack: boolean;
+  lastUpdated: number;
 }
 
 @Injectable({
@@ -42,12 +56,20 @@ export class CinemaService {
     actualPosition: 0,
     playbackRate: 1.0,
     syncQuality: 'Excellent',
-    isWebRtcStreaming: false
+    isWebRtcStreaming: false,
+    webRtcState: 'new',
+    iceState: 'new',
+    audioTrackReceived: false,
+    audioPlaybackActive: false,
+    audioAutoplayBlocked: true
   });
   public readonly syncState$: Observable<CinemaSyncState> = this.syncStateSubject.asObservable();
 
   private readonly deviceReportsSubject = new BehaviorSubject<Map<string, DeviceSyncReport>>(new Map());
   public readonly deviceReports$: Observable<Map<string, DeviceSyncReport>> = this.deviceReportsSubject.asObservable();
+
+  private readonly peerDiagnosticsSubject = new BehaviorSubject<Map<string, PeerDiagnostics>>(new Map());
+  public readonly peerDiagnostics$: Observable<Map<string, PeerDiagnostics>> = this.peerDiagnosticsSubject.asObservable();
 
   private audio: HTMLAudioElement;
   private fallbackAudioUrl = '';
@@ -66,11 +88,27 @@ export class CinemaService {
   private remoteAudioStream: MediaStream | null = null;
   private currentVideoElement: HTMLVideoElement | null = null;
   private mediaElementSource: MediaElementAudioSourceNode | null = null;
+  private mediaStreamDestination: MediaStreamAudioDestinationNode | null = null;
+  private hostGainNode: GainNode | null = null;
+  private hostVolume = 0.8;
 
-  // Web Audio Context for zero-latency mobile playback, spatial panning & gain control
+  // Phone state
+  private isUnlocked = false;
+  private isAutoplayBlocked = true;
+  private currentPhoneVolume = 0.85;
+  private currentPhoneMuted = false;
+
+  // Web Audio Context for zero-latency audio routing & chime
   private audioCtx: AudioContext | null = null;
-  private gainNode: GainNode | null = null;
-  private remoteStreamSourceNode: MediaStreamAudioSourceNode | null = null;
+  private remoteGainNode: GainNode | null = null;
+  private remoteMediaStreamSource: MediaStreamAudioSourceNode | null = null;
+
+  private iceServers: RTCIceServer[] = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
+  ];
 
   constructor() {
     this.audio = new Audio();
@@ -79,6 +117,7 @@ export class CinemaService {
     (this.audio as any).playsInline = true;
 
     this.initSignalRListeners();
+    this.fetchIceServers();
   }
 
   public setAudioElement(el: HTMLAudioElement): void {
@@ -87,7 +126,15 @@ export class CinemaService {
       this.audio.preload = 'auto';
       this.audio.autoplay = true;
       (this.audio as any).playsInline = true;
-      if (this.fallbackAudioUrl && !this.remoteAudioStream) {
+      this.audio.volume = this.currentPhoneVolume;
+      this.audio.muted = this.currentPhoneMuted;
+
+      if (this.remoteAudioStream) {
+        this.audio.srcObject = this.remoteAudioStream;
+        if (this.isUnlocked) {
+          this.audio.play().catch(e => console.warn('setAudioElement play error:', e));
+        }
+      } else if (this.fallbackAudioUrl) {
         this.audio.src = this.fallbackAudioUrl;
         this.audio.load();
       }
@@ -102,29 +149,36 @@ export class CinemaService {
     return this.signalRService.isConnected;
   }
 
-  private getIceServers(): RTCIceServer[] {
-    return [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' },
-      { urls: 'stun:stun.relay.metered.ca:80' },
-      {
-        urls: 'turn:standard.relay.metered.ca:80',
-        username: 'e7137f8eb4f7bb84813589b2',
-        credential: 'b+Z62O3q92HjD/iA'
-      },
-      {
-        urls: 'turn:standard.relay.metered.ca:443',
-        username: 'e7137f8eb4f7bb84813589b2',
-        credential: 'b+Z62O3q92HjD/iA'
-      },
-      {
-        urls: 'turn:standard.relay.metered.ca:443?transport=tcp',
-        username: 'e7137f8eb4f7bb84813589b2',
-        credential: 'b+Z62O3q92HjD/iA'
+  public async fetchIceServers(): Promise<void> {
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/cinema/ice-servers`);
+      if (res.ok) {
+        const servers = await res.json();
+        if (Array.isArray(servers) && servers.length > 0) {
+          this.iceServers = servers;
+        }
       }
-    ];
+    } catch {
+      // Keep Google STUN default
+    }
+  }
+
+  public getIceServers(): RTCIceServer[] {
+    return this.iceServers;
+  }
+
+  public async resumeAudioContext(): Promise<void> {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!this.audioCtx) {
+        this.audioCtx = new AudioCtx();
+      }
+      if (this.audioCtx.state === 'suspended') {
+        await this.audioCtx.resume();
+      }
+    } catch (e) {
+      console.warn('resumeAudioContext error:', e);
+    }
   }
 
   private initSignalRListeners(): void {
@@ -149,11 +203,18 @@ export class CinemaService {
   // --- Laptop Host WebRTC Streaming ---
 
   /**
-   * Laptop Host captures audio from local video element and shares with phones via WebRTC
+   * Laptop Host captures audio from local video element and shares with phones via WebRTC.
+   * Crucial: If video.src is a blob: URL, remove crossorigin so CORS doesn't silence Web Audio!
    */
   public attachVideoAudioSource(video: HTMLVideoElement): void {
     try {
-      video.crossOrigin = 'anonymous';
+      // Local blob: URLs MUST NOT have crossorigin attribute or Web Audio produces pure silence!
+      if (video.src && video.src.startsWith('blob:')) {
+        video.removeAttribute('crossorigin');
+        (video as any).crossOrigin = null;
+      } else if (video.src && (video.src.startsWith('http:') || video.src.startsWith('https:'))) {
+        video.crossOrigin = 'anonymous';
+      }
 
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       if (!this.audioCtx) {
@@ -163,21 +224,31 @@ export class CinemaService {
         this.audioCtx.resume().catch(() => {});
       }
 
-      if (this.currentVideoElement !== video) {
+      // Attach MediaElementSourceNode ONLY ONCE per HTMLVideoElement
+      if (!this.mediaElementSource || this.currentVideoElement !== video) {
         this.currentVideoElement = video;
 
         try {
           this.mediaElementSource = this.audioCtx.createMediaElementSource(video);
-          const dest = this.audioCtx.createMediaStreamDestination();
-          this.mediaElementSource.connect(dest);
-          this.mediaElementSource.connect(this.audioCtx.destination);
-          this.localAudioStream = dest.stream;
+
+          // 1. WebRTC Destination (clean reference audio for phones)
+          this.mediaStreamDestination = this.audioCtx.createMediaStreamDestination();
+          this.mediaElementSource.connect(this.mediaStreamDestination);
+          this.localAudioStream = this.mediaStreamDestination.stream;
+
+          // 2. Laptop Speaker Output via host gain node (laptop hears audio locally)
+          this.hostGainNode = this.audioCtx.createGain();
+          this.hostGainNode.gain.setValueAtTime(this.hostVolume, this.audioCtx.currentTime);
+          this.mediaElementSource.connect(this.hostGainNode);
+          this.hostGainNode.connect(this.audioCtx.destination);
+
+          console.log('[Cinema Host] Web Audio pipeline connected: Video -> Destination & Laptop Speaker');
         } catch (webaudioErr) {
-          console.warn('Web Audio createMediaElementSource fallback:', webaudioErr);
+          console.warn('[Cinema Host] Web Audio createMediaElementSource note:', webaudioErr);
         }
       }
 
-      // If localAudioStream has no tracks, fallback to captureStream
+      // Fallback captureStream if needed
       if (!this.localAudioStream || this.localAudioStream.getAudioTracks().length === 0) {
         if ((video as any).captureStream) {
           const cs = (video as any).captureStream();
@@ -191,8 +262,32 @@ export class CinemaService {
           }
         }
       }
+
+      // If media source changed, replace tracks on active peer connections without reconnecting
+      this.replaceTracksForActivePeers();
     } catch (e) {
       console.warn('Could not capture audio stream from video:', e);
+    }
+  }
+
+  public setHostVolume(volume0to100: number): void {
+    this.hostVolume = Math.max(0, Math.min(100, volume0to100)) / 100;
+    if (this.hostGainNode && this.audioCtx) {
+      this.hostGainNode.gain.setValueAtTime(this.hostVolume, this.audioCtx.currentTime);
+    }
+  }
+
+  public replaceTracksForActivePeers(): void {
+    if (!this.localAudioStream) return;
+    const audioTrack = this.localAudioStream.getAudioTracks()[0];
+    if (!audioTrack) return;
+
+    for (const [targetId, pc] of this.peerConnections) {
+      const senders = pc.getSenders();
+      const audioSender = senders.find(s => s.track && s.track.kind === 'audio');
+      if (audioSender && audioSender.track !== audioTrack) {
+        audioSender.replaceTrack(audioTrack).catch(err => console.warn(`replaceTrack error for ${targetId}:`, err));
+      }
     }
   }
 
@@ -217,9 +312,13 @@ export class CinemaService {
     }
 
     try {
-      // Close previous connection if any
+      // Check if existing peer connection is already active and healthy
       const existing = this.peerConnections.get(targetConnectionId);
       if (existing) {
+        if (existing.connectionState === 'connected' && existing.iceConnectionState === 'connected') {
+          console.log(`[Host WebRTC] Phone ${targetConnectionId} is already connected with active audio.`);
+          return;
+        }
         try { existing.close(); } catch {}
       }
 
@@ -229,6 +328,24 @@ export class CinemaService {
       audioTracks.forEach(track => {
         pc.addTrack(track, this.localAudioStream!);
       });
+
+      pc.onconnectionstatechange = () => {
+        console.log(`[Host WebRTC] Phone ${targetConnectionId} connectionState:`, pc.connectionState);
+        this.updatePeerDiagnostic(targetConnectionId, pc.connectionState, pc.iceConnectionState, true);
+        if (pc.connectionState === 'connected') {
+          this.reconnectAttempts.delete(targetConnectionId);
+        } else if (pc.connectionState === 'failed') {
+          this.reconnectPhoneSpeaker(targetConnectionId, roomCode);
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        console.log(`[Host WebRTC] Phone ${targetConnectionId} iceConnectionState:`, pc.iceConnectionState);
+        this.updatePeerDiagnostic(targetConnectionId, pc.connectionState, pc.iceConnectionState, true);
+        if (pc.iceConnectionState === 'connected') {
+          this.reconnectAttempts.delete(targetConnectionId);
+        }
+      };
 
       pc.onicecandidate = (event) => {
         if (event.candidate) {
@@ -251,9 +368,47 @@ export class CinemaService {
         signalType: 'offer',
         data: JSON.stringify(offer)
       });
+
+      this.updatePeerDiagnostic(targetConnectionId, pc.connectionState, pc.iceConnectionState, true);
     } catch (err) {
       console.warn(`WebRTC error connecting to phone ${targetConnectionId}:`, err);
     }
+  }
+
+  private reconnectAttempts = new Map<string, number>();
+
+  public reconnectPhoneSpeaker(targetConnectionId: string, roomCode: string, force = false): void {
+    if (force) {
+      this.reconnectAttempts.delete(targetConnectionId);
+    }
+    const attempts = this.reconnectAttempts.get(targetConnectionId) || 0;
+    if (attempts >= 2) {
+      console.log(`[Host WebRTC] Direct P2P blocked by cellular carrier NAT for ${targetConnectionId}. Use same Wi-Fi.`);
+      return;
+    }
+    this.reconnectAttempts.set(targetConnectionId, attempts + 1);
+    const delay = (attempts + 1) * 2000;
+    setTimeout(() => {
+      console.log(`[Host WebRTC] Retrying connection to phone ${targetConnectionId} (${attempts + 1}/2)...`);
+      this.connectToPhoneSpeaker(targetConnectionId, roomCode);
+    }, delay);
+  }
+
+  private updatePeerDiagnostic(
+    connectionId: string,
+    connState: RTCPeerConnectionState,
+    iceState: RTCIceConnectionState,
+    hasTrack: boolean
+  ): void {
+    const current = new Map(this.peerDiagnosticsSubject.value);
+    current.set(connectionId, {
+      connectionId,
+      connectionState: connState,
+      iceState,
+      hasTrack,
+      lastUpdated: Date.now()
+    });
+    this.peerDiagnosticsSubject.next(current);
   }
 
   // --- Phone Listener WebRTC Receiver ---
@@ -272,7 +427,23 @@ export class CinemaService {
         const pc = new RTCPeerConnection({ iceServers: this.getIceServers() });
         this.peerConnections.set(senderId, pc);
 
+        pc.onconnectionstatechange = () => {
+          console.log(`[Phone WebRTC] Connection state:`, pc.connectionState);
+          this.updateSyncState({
+            webRtcState: pc.connectionState,
+            iceState: pc.iceConnectionState
+          });
+        };
+
+        pc.oniceconnectionstatechange = () => {
+          console.log(`[Phone WebRTC] ICE state:`, pc.iceConnectionState);
+          this.updateSyncState({
+            iceState: pc.iceConnectionState
+          });
+        };
+
         pc.ontrack = (event) => {
+          console.log('[Phone WebRTC] Remote audio track received!');
           let stream: MediaStream;
           if (event.streams && event.streams[0]) {
             stream = event.streams[0];
@@ -284,7 +455,11 @@ export class CinemaService {
 
           this.remoteAudioStream = stream;
           this.playRemoteStream(stream);
-          this.updateSyncState({ isWebRtcStreaming: true, syncQuality: 'Excellent' });
+          this.updateSyncState({
+            isWebRtcStreaming: true,
+            syncQuality: 'Excellent',
+            audioTrackReceived: true
+          });
         };
 
         pc.onicecandidate = (event) => {
@@ -303,7 +478,9 @@ export class CinemaService {
         // Flush queued candidates
         const queued = this.candidateQueues.get(senderId) || [];
         for (const cand of queued) {
-          await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+          if (cand && cand.candidate) {
+            await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+          }
         }
         this.candidateQueues.delete(senderId);
 
@@ -314,6 +491,11 @@ export class CinemaService {
           targetConnectionId: senderId,
           signalType: 'answer',
           data: JSON.stringify(answer)
+        });
+
+        this.updateSyncState({
+          webRtcState: pc.connectionState,
+          iceState: pc.iceConnectionState
         });
       } catch (err) {
         console.warn('Failed to handle WebRTC offer on phone:', err);
@@ -329,7 +511,9 @@ export class CinemaService {
         // Flush queued candidates
         const queued = this.candidateQueues.get(senderId) || [];
         for (const cand of queued) {
-          await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+          if (cand && cand.candidate) {
+            await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+          }
         }
         this.candidateQueues.delete(senderId);
       }
@@ -337,13 +521,15 @@ export class CinemaService {
       const pc = this.peerConnections.get(senderId);
       if (pc) {
         const candidate = JSON.parse(signal.data);
-        if (!pc.remoteDescription || !pc.remoteDescription.type) {
-          if (!this.candidateQueues.has(senderId)) {
-            this.candidateQueues.set(senderId, []);
+        if (candidate && candidate.candidate) {
+          if (!pc.remoteDescription || !pc.remoteDescription.type) {
+            if (!this.candidateQueues.has(senderId)) {
+              this.candidateQueues.set(senderId, []);
+            }
+            this.candidateQueues.get(senderId)!.push(candidate);
+          } else {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
           }
-          this.candidateQueues.get(senderId)!.push(candidate);
-        } else {
-          await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
         }
       }
     } else if (signal.signalType === 'ready') {
@@ -355,11 +541,10 @@ export class CinemaService {
   }
 
   private playRemoteStream(stream: MediaStream): void {
-    // 1. Attach directly to HTMLAudioElement
-    this.audio.srcObject = stream;
-    this.audio.play().catch(e => console.warn('audio.play srcObject error:', e));
+    this.remoteAudioStream = stream;
 
-    // 2. Also attach via Web Audio API AudioContext for zero-latency, mobile autoplay bypass
+    // 1. Primary Zero-Latency Hardware Speaker Pipeline via Web Audio API:
+    // Web Audio routes directly to mobile multimedia loudspeaker with zero buffer latency!
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!this.audioCtx) {
@@ -369,19 +554,51 @@ export class CinemaService {
         this.audioCtx.resume().catch(() => {});
       }
 
-      if (!this.gainNode) {
-        this.gainNode = this.audioCtx.createGain();
-        this.gainNode.gain.value = this.audio.volume || 0.85;
-        this.gainNode.connect(this.audioCtx.destination);
+      if (!this.remoteGainNode) {
+        this.remoteGainNode = this.audioCtx.createGain();
+        this.remoteGainNode.connect(this.audioCtx.destination);
       }
 
-      if (this.remoteStreamSourceNode) {
-        try { this.remoteStreamSourceNode.disconnect(); } catch {}
+      const targetGain = this.currentPhoneMuted ? 0 : this.currentPhoneVolume;
+      this.remoteGainNode.gain.setValueAtTime(targetGain, this.audioCtx.currentTime);
+
+      if (this.remoteMediaStreamSource) {
+        try { this.remoteMediaStreamSource.disconnect(); } catch {}
       }
-      this.remoteStreamSourceNode = this.audioCtx.createMediaStreamSource(stream);
-      this.remoteStreamSourceNode.connect(this.gainNode);
+      this.remoteMediaStreamSource = this.audioCtx.createMediaStreamSource(stream);
+      this.remoteMediaStreamSource.connect(this.remoteGainNode);
+      console.log('[Phone Audio] Web Audio speaker pipeline connected to WebRTC stream');
+    } catch (webaudioErr) {
+      console.warn('[Phone Audio] Web Audio routing note:', webaudioErr);
+    }
+
+    // 2. DOM HTML5 Audio Element (keeps browser media session alive)
+    try {
+      this.audio.srcObject = stream;
+      // If Web Audio succeeded, keep DOM element at near-zero volume to prevent dual-audio echo
+      this.audio.volume = this.remoteMediaStreamSource ? 0.001 : this.currentPhoneVolume;
+      this.audio.muted = this.currentPhoneMuted;
+
+      const playPromise = this.audio.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            this.isAutoplayBlocked = false;
+            this.updateSyncState({
+              audioPlaybackActive: true,
+              audioAutoplayBlocked: false
+            });
+          })
+          .catch(e => {
+            console.warn('[Phone Audio] DOM audio.play waiting for gesture:', e);
+            this.updateSyncState({
+              audioPlaybackActive: !this.isAutoplayBlocked,
+              audioAutoplayBlocked: this.isAutoplayBlocked
+            });
+          });
+      }
     } catch (e) {
-      console.warn('Web Audio stream source routing error:', e);
+      console.warn('playRemoteStream error:', e);
     }
   }
 
@@ -413,11 +630,11 @@ export class CinemaService {
       this.evaluateAndAdjustDrift();
     }, 300);
 
-    // Start telemetry reporter every 2000ms
+    // Start telemetry reporter every 1500ms
     if (this.telemetryIntervalId) clearInterval(this.telemetryIntervalId);
     this.telemetryIntervalId = setInterval(() => {
       this.sendTelemetryReport();
-    }, 2000);
+    }, 1500);
   }
 
   public applyPlaybackState(state: PlaybackState): void {
@@ -426,9 +643,8 @@ export class CinemaService {
     // If WebRTC is actively streaming from laptop, audio is transmitted live!
     if (this.remoteAudioStream) {
       if (state.isPlaying) {
-        if (this.audio.paused) this.audio.play().catch(() => {});
-        if (this.audioCtx && this.audioCtx.state === 'suspended') {
-          this.audioCtx.resume().catch(() => {});
+        if (this.audio.paused && this.isUnlocked) {
+          this.audio.play().catch(() => {});
         }
       } else {
         this.audio.pause();
@@ -467,7 +683,7 @@ export class CinemaService {
     this.safeSetCurrentTime(targetTime);
     this.evaluateAndAdjustDrift();
 
-    if (this.audio.paused) {
+    if (this.audio.paused && this.isUnlocked) {
       this.audio.play().catch(e => console.warn('audio.play error:', e));
     }
   }
@@ -476,6 +692,12 @@ export class CinemaService {
     if (!this.currentPlaybackState || !this.currentPlaybackState.isPlaying) {
       return;
     }
+
+    const firstPc = this.peerConnections.size > 0 ? Array.from(this.peerConnections.values())[0] : null;
+    const webRtcState = firstPc ? firstPc.connectionState : 'disconnected';
+    const iceState = firstPc ? firstPc.iceConnectionState : 'new';
+    const audioTrackReceived = !!this.remoteAudioStream && this.remoteAudioStream.getAudioTracks().length > 0;
+    const audioPlaybackActive = !this.audio.paused && !this.audio.ended && this.audio.readyState >= 2;
 
     // When WebRTC is active, drift is bounded by network latency (< 25ms)
     if (this.remoteAudioStream) {
@@ -487,7 +709,12 @@ export class CinemaService {
         actualPosition: this.currentPlaybackState.currentPosition,
         playbackRate: 1.0,
         syncQuality: 'Excellent',
-        isWebRtcStreaming: true
+        isWebRtcStreaming: true,
+        webRtcState,
+        iceState,
+        audioTrackReceived,
+        audioPlaybackActive,
+        audioAutoplayBlocked: this.isAutoplayBlocked
       });
       return;
     }
@@ -529,7 +756,12 @@ export class CinemaService {
       actualPosition,
       playbackRate: this.audio.playbackRate,
       syncQuality,
-      isWebRtcStreaming: false
+      isWebRtcStreaming: false,
+      webRtcState,
+      iceState,
+      audioTrackReceived: false,
+      audioPlaybackActive,
+      audioAutoplayBlocked: this.isAutoplayBlocked
     });
   }
 
@@ -544,14 +776,22 @@ export class CinemaService {
       playbackRate: state.playbackRate,
       syncStatus: state.syncQuality,
       devicePosition: this.devicePosition,
-      lastSyncTime: Date.now()
+      lastSyncTime: Date.now(),
+      webRtcState: state.webRtcState,
+      iceState: state.iceState,
+      audioTrackReceived: state.audioTrackReceived,
+      audioPlaybackActive: state.audioPlaybackActive,
+      audioAutoplayBlocked: state.audioAutoplayBlocked
     };
 
     this.signalRService.reportDeviceSync(this.currentRoomCode, report).catch(() => {});
   }
 
   public unlockAudioOnTouch(): void {
-    // 1. Resume Web Audio Context
+    this.isUnlocked = true;
+    this.isAutoplayBlocked = false;
+
+    // 1. Resume Web Audio Context immediately inside user gesture!
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!this.audioCtx) {
@@ -561,7 +801,22 @@ export class CinemaService {
         this.audioCtx.resume().catch(() => {});
       }
 
-      // Play immediate confirmation chime so user instantly hears their speaker working!
+      // If remote stream is already waiting, connect to Web Audio right now!
+      if (this.remoteAudioStream) {
+        if (!this.remoteGainNode) {
+          this.remoteGainNode = this.audioCtx.createGain();
+          this.remoteGainNode.connect(this.audioCtx.destination);
+        }
+        const targetGain = this.currentPhoneMuted ? 0 : this.currentPhoneVolume;
+        this.remoteGainNode.gain.setValueAtTime(targetGain, this.audioCtx.currentTime);
+
+        if (!this.remoteMediaStreamSource) {
+          this.remoteMediaStreamSource = this.audioCtx.createMediaStreamSource(this.remoteAudioStream);
+          this.remoteMediaStreamSource.connect(this.remoteGainNode);
+        }
+      }
+
+      // Play immediate confirmation chime so user instantly hears speaker working
       const osc = this.audioCtx.createOscillator();
       const gain = this.audioCtx.createGain();
       gain.gain.setValueAtTime(0.2, this.audioCtx.currentTime);
@@ -577,10 +832,12 @@ export class CinemaService {
       console.warn('Web Audio unlock chime error:', e);
     }
 
-    // 2. Play HTML5 Audio element immediately with fallback URL or stream
+    // 2. Play HTML5 Audio element immediately to unlock mobile browser restrictions
     try {
       if (this.remoteAudioStream) {
         this.audio.srcObject = this.remoteAudioStream;
+        this.audio.volume = this.remoteMediaStreamSource ? 0.001 : this.currentPhoneVolume;
+        this.audio.muted = this.currentPhoneMuted;
         this.audio.play().catch(e => console.warn('Stream play error:', e));
       } else if (this.fallbackAudioUrl) {
         this.audio.src = this.fallbackAudioUrl;
@@ -590,10 +847,21 @@ export class CinemaService {
           this.audio.currentTime = Math.max(0, this.currentPlaybackState.currentPosition + elapsed);
         }
         this.audio.play().catch(e => console.warn('Direct fallback play error:', e));
+      } else {
+        // Play silent sound to permanently unlock the element
+        const playPromise = this.audio.play();
+        if (playPromise !== undefined) {
+          playPromise.catch(() => {});
+        }
       }
     } catch (e) {
       console.warn('HTML5 Audio unlock error:', e);
     }
+
+    this.updateSyncState({
+      audioAutoplayBlocked: false,
+      audioPlaybackActive: true
+    });
 
     // 3. Notify Host that this phone is unlocked and ready for WebRTC stream
     if (this.currentRoomCode && this.signalRService.isConnected) {
@@ -606,21 +874,26 @@ export class CinemaService {
 
   public setDeviceVolume(volume0to100: number): void {
     const clamped = Math.max(0, Math.min(100, volume0to100));
-    this.audio.volume = clamped / 100;
-    if (this.gainNode && this.audioCtx) {
-      this.gainNode.gain.setValueAtTime(clamped / 100, this.audioCtx.currentTime);
+    this.currentPhoneVolume = clamped / 100;
+    this.audio.volume = this.remoteMediaStreamSource ? 0.001 : this.currentPhoneVolume;
+    if (this.remoteGainNode && this.audioCtx) {
+      this.remoteGainNode.gain.setValueAtTime(
+        this.currentPhoneMuted ? 0 : this.currentPhoneVolume,
+        this.audioCtx.currentTime
+      );
     }
   }
 
   public toggleMute(): boolean {
-    this.audio.muted = !this.audio.muted;
-    if (this.gainNode && this.audioCtx) {
-      this.gainNode.gain.setValueAtTime(
-        this.audio.muted ? 0 : this.audio.volume,
+    this.currentPhoneMuted = !this.currentPhoneMuted;
+    this.audio.muted = this.currentPhoneMuted;
+    if (this.remoteGainNode && this.audioCtx) {
+      this.remoteGainNode.gain.setValueAtTime(
+        this.currentPhoneMuted ? 0 : this.currentPhoneVolume,
         this.audioCtx.currentTime
       );
     }
-    return this.audio.muted;
+    return this.currentPhoneMuted;
   }
 
   public setDevicePosition(position: DevicePosition): void {
@@ -628,8 +901,8 @@ export class CinemaService {
     if (this.currentRoomCode && this.signalRService.isConnected) {
       this.signalRService.updateDevicePosition(this.currentRoomCode, {
         devicePosition: position,
-        volume: Math.round(this.audio.volume * 100),
-        isMuted: this.audio.muted
+        volume: Math.round(this.currentPhoneVolume * 100),
+        isMuted: this.currentPhoneMuted
       }).catch(() => {});
     }
   }
@@ -653,6 +926,23 @@ export class CinemaService {
   public stop(): void {
     if (this.syncIntervalId) clearInterval(this.syncIntervalId);
     if (this.telemetryIntervalId) clearInterval(this.telemetryIntervalId);
+
+    if (this.remoteMediaStreamSource) {
+      try { this.remoteMediaStreamSource.disconnect(); } catch {}
+      this.remoteMediaStreamSource = null;
+    }
+    if (this.remoteGainNode) {
+      try { this.remoteGainNode.disconnect(); } catch {}
+      this.remoteGainNode = null;
+    }
+    if (this.hostGainNode) {
+      try { this.hostGainNode.disconnect(); } catch {}
+      this.hostGainNode = null;
+    }
+    if (this.mediaElementSource) {
+      try { this.mediaElementSource.disconnect(); } catch {}
+      this.mediaElementSource = null;
+    }
 
     this.peerConnections.forEach(pc => pc.close());
     this.peerConnections.clear();

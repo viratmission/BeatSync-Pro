@@ -19,7 +19,7 @@ import { PlaybackState } from '../../core/models/playback-state.model';
   template: `
     <div class="cinema-device-page">
       <!-- Hidden DOM Audio Element for Real-time Playback -->
-      <audio #speakerAudio autoplay playsinline preload="auto" style="display:none"></audio>
+      <audio #speakerAudio autoplay playsinline preload="auto" class="hidden-audio-element"></audio>
 
       <!-- Ambient Glow Background -->
       <div class="ambient-glow" [class.playing]="isPlaying"></div>
@@ -186,7 +186,30 @@ import { PlaybackState } from '../../core/models/playback-state.model';
                 {{ syncState.isWebRtcStreaming ? 'WebRTC P2P' : 'HTTP Chunked' }}
               </span>
             </div>
+            <div class="metric-item">
+              <span class="metric-label">WEBRTC P2P</span>
+              <span class="metric-val" [class.drift-good]="syncState.webRtcState === 'connected'">
+                {{ syncState.webRtcState === 'connected' ? 'Connected ✅' : (syncState.webRtcState ? syncState.webRtcState.toUpperCase() : 'Connecting ⏳') }}
+              </span>
+            </div>
+            <div class="metric-item">
+              <span class="metric-label">SPEAKER OUTPUT</span>
+              <span class="metric-val" [class.drift-good]="syncState.audioPlaybackActive">
+                {{ syncState.audioPlaybackActive ? 'Playing 🔊' : (isAudioUnlocked ? 'Standby ⏸️' : 'Muted 🔇') }}
+              </span>
+            </div>
           </div>
+
+          @if (syncState.webRtcState === 'failed') {
+            <div class="p2p-failed-banner">
+              <span class="banner-icon">📶</span>
+              <div class="banner-body">
+                <strong>Direct Audio Blocked by 4G Carrier NAT</strong>
+                <p>Your mobile phone is on 4G mobile data. For zero-latency local movie sound, connect this phone to the <b>same Wi-Fi</b> as the laptop (or turn on Laptop Hotspot)!</p>
+                <button class="btn-retry-p2p" (click)="retryWebRtc()">⚡ Retry Direct Audio</button>
+              </div>
+            </div>
+          }
         </section>
 
         <!-- Local Speaker Controls -->
@@ -244,6 +267,16 @@ import { PlaybackState } from '../../core/models/playback-state.model';
       background: #090d16;
       color: #f8fafc;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    .hidden-audio-element {
+      position: fixed;
+      top: -9999px;
+      left: -9999px;
+      width: 1px;
+      height: 1px;
+      opacity: 0.001;
+      pointer-events: none;
     }
 
     .cinema-device-page {
@@ -824,6 +857,52 @@ import { PlaybackState } from '../../core/models/playback-state.model';
       color: #38bdf8;
     }
 
+    .p2p-failed-banner {
+      margin-top: 12px;
+      padding: 12px 14px;
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      border-radius: 12px;
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      font-size: 12px;
+      line-height: 1.4;
+      color: #fca5a5;
+    }
+
+    .banner-icon {
+      font-size: 20px;
+      flex-shrink: 0;
+    }
+
+    .banner-body strong {
+      color: #ffffff;
+      display: block;
+      margin-bottom: 3px;
+    }
+
+    .banner-body p {
+      margin: 0 0 8px 0;
+      color: #fecaca;
+    }
+
+    .btn-retry-p2p {
+      background: #ef4444;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-weight: 700;
+      font-size: 11px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn-retry-p2p:hover {
+      background: #dc2626;
+    }
+
     /* Local Speaker Controls */
     .speaker-controls-card {
       background: rgba(15, 23, 42, 0.7);
@@ -1098,6 +1177,11 @@ export class CinemaDeviceComponent implements OnInit, OnDestroy, AfterViewInit {
 
   public toggleMute(): void {
     this.isMuted = this.cinemaService.toggleMute();
+  }
+
+  public retryWebRtc(): void {
+    this.unlockAudio();
+    this.toastService.info('Requesting direct audio connection...');
   }
 
   public playTestChirp(): void {

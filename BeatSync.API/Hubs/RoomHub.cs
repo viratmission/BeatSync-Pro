@@ -304,7 +304,7 @@ public class RoomHub : Hub
         }
     }
 
-    // WebRTC Signaling Relay (Offer, Answer, ICE Candidate) between Laptop Host and Phones
+    // WebRTC Signaling Relay (Offer, Answer, ICE Candidate, Ready) between Laptop Host and Phones
     public async Task SendWebRtcSignal(string roomCode, WebRtcSignalDto signal)
     {
         var normalizedCode = roomCode.Trim().ToUpper();
@@ -312,6 +312,9 @@ public class RoomHub : Hub
 
         signal.SenderConnectionId = Context.ConnectionId;
         signal.SenderUsername = participant?.Username;
+
+        _logger.LogInformation("WebRTC Relay: [{SignalType}] from {Sender} ({SenderId}) -> Target: {Target} in room {RoomCode}",
+            signal.SignalType, signal.SenderUsername ?? "Unknown", Context.ConnectionId, signal.TargetConnectionId ?? "All", normalizedCode);
 
         if (!string.IsNullOrWhiteSpace(signal.TargetConnectionId))
         {

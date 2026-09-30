@@ -24,7 +24,7 @@ function httpsRequest(options, postData) {
 }
 
 async function testOnlineCinema() {
-  const publicDomain = 'replica-builder-impression-control.trycloudflare.com';
+  const publicDomain = 'election-intensity-fairly-rome.trycloudflare.com';
   const hubUrl = `https://${publicDomain}/hubs/room`;
 
   console.log('====================================================================');
