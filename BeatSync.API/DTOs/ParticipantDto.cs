@@ -9,4 +9,9 @@ public class ParticipantDto
     public DateTime JoinedAt { get; set; }
     public bool IsHost { get; set; }
     public bool IsConnected { get; set; }
+    public string DeviceRole { get; set; } = "AudioSpeaker";
+    public string DevicePosition { get; set; } = "FrontLeft";
+    public string? DeviceName { get; set; }
+    public int Volume { get; set; } = 80;
+    public bool IsMuted { get; set; } = false;
 }

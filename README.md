@@ -1,84 +1,89 @@
-# BeatSync Clone — Synchronized Real-Time Web Audio
+# BeatSync Pro — Synchronized Real-Time Web Audio & Multi-Device Sync Cinema
 
-BeatSync Clone is a full-stack web application inspired by the core functionality and interaction patterns of [BeatSync](https://beatsync.gg/). It allows multiple users across different devices (laptops, phones, tablets) to join a shared room and synchronize audio playback with sub-millisecond precision.
+**BeatSync Pro** is an advanced full-stack real-time entertainment application built with **Angular 22**, **ASP.NET Core 9.0 Web API**, **SignalR**, and **WebRTC / Web Audio API**. It supports both **Synchronized Music Rooms** and a cutting-edge **Multi-Device Sync Cinema Surround Experience**.
 
 ---
 
-## 🚀 Features
+## 🎬 Product Overview: Multi-Device Sync Cinema
 
-- **Minimal, Modern Landing Page (Phase 1)**
-  - Clean brand identity with music wave aesthetic.
-  - 6-character room code input with auto-capitalization and validation.
-  - Random username generator (`productive-eagle`, `clever-tiger`, `silent-wolf`, `happy-panda`) with instant regeneration and custom editing.
-  - One-click room creation and joining.
-  - Native device speakers option checkbox.
-  - Footer with Community, GitHub, and About dialogs.
+Transform any room into a personal wireless **5.1 / 7.1 Surround Sound Home Theater** using everyday devices:
 
-- **Dynamic Routing (Phase 2)**
-  - `/`: Home landing page.
-  - `/room/:roomCode`: Real-time synchronized room page.
-  - `/login`: User sign-in page.
-  - `/profile`: User settings and device audio preferences.
+```
+                  📱 Phone 1 (Front Left)    📱 Phone 2 (Front Center)    📱 Phone 3 (Front Right)
+                                                     🔊
+                                            [ 💻 MASTER LAPTOP ]
+                                              🎬 4K/HD Video Host
+                                                     🔊
+                  📱 Phone 4 (Surround Left)        👤 USERS             📱 Phone 5 (Surround Right)
+                                                     🔊
+                  📱 Phone 6 (Rear Left)     📱 Phone 7 (Rear Center)     📱 Phone 8 (Rear Right)
+```
 
-- **Robust Room System & Multi-Participant Presence (Phases 3 & 4)**
-  - Real database-backed rooms with unique 6-character codes.
-  - Multiple simultaneous participants per room.
-  - Host visually distinguished with a `HOST` badge.
-  - Real-time `UserJoined` and `UserLeft` broadcast updates via SignalR.
-  - Automatic disconnection handling and host migration if the original host leaves.
+### Roles & Architecture
+1. **Laptop (Authoritative Host)**:
+   - Plays local or streamed video (HTML5 `<video>`, MP4/WebM/MKV).
+   - Controls master playback (Play, Pause, Seek, Rate).
+   - Captures audio via `HTMLVideoElement.captureStream()` or Web Audio API.
+   - Monitors live connected phone speakers via an interactive **Theater Surround Map** and real-time telemetry panel.
+2. **Phones / Tablets (Surround Speakers)**:
+   - Act **strictly as wireless audio-only surround sound speakers**.
+   - **CRITICAL BANDWIDTH SAVING**: Phones **never download the video stream**. They receive audio tracks exclusively via low-latency **WebRTC P2P streams** or chunked **HTTP Range requests** (~48kbps Opus audio per device).
+   - Dynamic channel reassignment (Front Left, Front Center, Front Right, Surround Left, Surround Right, Rear Left, Rear Center, Rear Right).
+   - Mobile autoplay unlock overlay & Screen Wake Lock so phones do not sleep mid-movie.
+   - Local volume calibration and test chime sound generator.
 
-- **Interactive Room UI & Audio Player (Phase 5)**
-  - Split responsive layout (Desktop: side-by-side player & participants; Mobile: sleek stacked card layout).
-  - Vinyl disc visualizer with active spin animation on playback.
-  - Master controls for host: Play, Pause, Seek, Previous, Next.
-  - Participant status indicator: Displays who is hosting and listen-only synchronization status.
-  - Real-time participants list with initials avatars and live status dots.
+### High-Precision Sync Engine
+- **Clock Drift Calibration**: Clients compute RTT and clock offset through high-frequency ping-pong time requests to the backend.
+- **Scheduled Playback**: When the Host presses Play, commands are broadcast with a future server timestamp (`ServerNow + 100ms`), allowing all phones to start playback synchronously, eliminating packet jitter.
+- **Multi-Tier Drift Mitigation**:
+  - **Tight Alignment (< 50ms)**: Standard $1.0\times$ playback speed.
+  - **Smooth Rate Adjustment (50ms – 500ms)**: Sub-audible pitch-preserved speed adjustment ($1.05\times$ to catch up, $0.95\times$ to wait) without pops or audible stutter.
+  - **Hard Seek (> 500ms)**: Instantaneous seek for major desync events.
 
-- **Audio Engine & Sample Tracks (Phase 6)**
-  - Built-in royalty-free procedural audio tracks generated on first run:
-    1. *Neon Horizon* (Synthwave Collective - 45s)
-    2. *Midnight Beats* (Lo-Fi Chillroom - 50s)
-    3. *Solar Echoes* (Ambient Pulse - 40s)
-  - Custom audio file upload (MP3, WAV, OGG, M4A, AAC up to 25MB).
-  - HTMLAudioElement and Web Audio API integration.
+---
 
-- **High-Precision Real-Time Clock & Audio Synchronization (Phases 7, 8, 9)**
-  - **Clock Drift Calibration**: Clients periodically sample server timestamp via SignalR ping-pong round trips, calculating accurate network latency (RTT) and local clock offset.
-  - **Projected Position Tracking**: When host plays, pauses, or seeks, state is broadcast with high-resolution server timestamps:
-    $$\text{Expected Position} = \text{CurrentPosition} + (\text{ServerNow} - \text{ServerTimestamp}) \times \text{PlaybackRate}$$
-  - **Dual-Tolerance Sync Engine**:
-    - **Large Drift (> 1.2s)**: Direct hard seek (`audio.currentTime = expectedPosition`).
-    - **Mild Drift (50ms – 1.2s)**: Smooth catch-up using subtle `audio.playbackRate` micro-adjustments ($1.05\times$ to catch up, $0.95\times$ to wait) without audio popping or audible stuttering.
-    - **Tight Alignment (< 50ms)**: Preserves perfect $1.0\times$ speed.
+## 🚀 Features Summary
 
-- **Local Volume & Output Device Routing (Phases 10 & 11)**
-  - Volume is strictly local to each device (`localStorage` persistence).
-  - Native speaker device selection via `navigator.mediaDevices.enumerateDevices()` and `HTMLMediaElement.setSinkId()` with graceful fallback.
+### 1. Multi-Device Cinema Experience
+- **Cinema Host Dashboard (`/cinema/host/:roomCode`)**:
+  - HTML5 Video player with custom controls, local file picker, and sample trailer loader.
+  - Interactive 8-channel theater seating diagram with live device placement dots.
+  - Master timeline scrub bar, play/pause, seek, volume, and playback rate.
+  - Live device telemetry table showing RTT, drift in ms, volume, and sync status for each phone.
+- **Cinema Phone Speaker HUD (`/cinema/device/:roomCode`)**:
+  - Dark cinema mode interface with glowing animated audio equalizer.
+  - Channel badge and position switcher (FL, FC, FR, SL, SR, RL, RC, RR).
+  - Tap-to-Unlock audio gesture banner for mobile iOS Safari & Android Chrome.
+  - Local speaker volume slider and mute toggle.
+  - Live audio drift counter and sync status indicator.
+  - Test speaker output tone generator.
 
-- **Clean Architecture & Enterprise Structure (Phases 12, 13, 14, 15, 16, 19)**
-  - Controller → Service Layer → Repository Layer → SQL Server EF Core.
-  - Data transfer objects (DTOs) with model validation attributes.
-  - Global structured exception handling middleware.
-  - Host permission verification on SignalR audio controls.
+### 2. Standard Audio Sync Rooms (`/room/:roomCode`)
+- Synchronized multi-device music listening rooms.
+- Built-in royalty-free procedural synthwave, lo-fi, and ambient tracks.
+- Custom audio file upload (MP3, WAV, OGG, M4A, AAC).
+- Spinning vinyl disc visualization and live presence list.
+- Automatic host migration if the original room host disconnects.
 
 ---
 
 ## 🛠️ Tech Stack
 
 ### Frontend
-- **Angular 22** (Standalone Components, modern signals & RxJS)
-- **TypeScript**
-- **HTML5 & Vanilla CSS** (Curated light neutral palette, responsive flexbox/grid)
+- **Angular 22** (Standalone Components, Signals & RxJS)
+- **TypeScript 5**
+- **Vanilla CSS3** (Futuristic dark glassmorphism design system)
 - **SignalR Client** (`@microsoft/signalr`)
-- **Web Audio API & HTMLAudioElement**
+- **WebRTC API** (RTCPeerConnection audio-only mesh)
+- **Web Audio API** (Spatial panning, low-latency audio processing, sine wave test generator)
 
 ### Backend
 - **ASP.NET Core 9.0 Web API**
 - **C# 13**
-- **ASP.NET Core SignalR** (WebSockets / Server-Sent Events / Long Polling fallback)
+- **SignalR Core** (Low-latency WebSockets hub)
 - **Entity Framework Core 9.0**
 - **Microsoft SQL Server / LocalDB**
-- **Swagger / OpenAPI**
+- **HTTP Range Streaming** (RFC 7233 partial content audio delivery)
 
 ---
 
@@ -90,209 +95,147 @@ BeatSync/
 │   ├── src/
 │   │   ├── app/
 │   │   │   ├── core/
-│   │   │   │   ├── models/           # Typed TypeScript interfaces (Room, Participant, Track, PlaybackState)
-│   │   │   │   └── services/         # RoomService, SignalRService, AudioService, AudioDeviceService, UserService
-│   │   │   ├── shared/
-│   │   │   │   └── components/       # HeaderComponent, FooterComponent, ToastComponent
+│   │   │   │   ├── models/           # cinema.model.ts, room.model.ts, participant.model.ts, playback-state.model.ts
+│   │   │   │   └── services/         # cinema.service.ts, signalr.service.ts, room.service.ts, audio-device.service.ts
 │   │   │   ├── pages/
-│   │   │   │   ├── home/             # Phase 1: Landing page with room code input & username generator
-│   │   │   │   ├── room/             # Phase 5: Synchronized player & live participants panel
-│   │   │   │   ├── login/            # Optional sign-in page
-│   │   │   │   └── profile/          # User audio preferences
-│   │   │   ├── app.routes.ts         # Route definitions
-│   │   │   ├── app.config.ts         # Angular providers (HttpClient, Router)
-│   │   │   └── app.ts                # Root application container
-│   │   ├── index.html
-│   │   └── styles.css                # Global design system & theme tokens
+│   │   │   │   ├── home/             # Landing page (Join room, Host Cinema, Create Music Room)
+│   │   │   │   ├── cinema-host/      # Laptop Host UI: Video player, 8-speaker theater map, telemetry
+│   │   │   │   ├── cinema-device/    # Phone Speaker UI: Channel indicator, drift telemetry, volume
+│   │   │   │   ├── room/             # Standard BeatSync music listening room
+│   │   │   │   ├── login/            # Sign-in
+│   │   │   │   └── profile/          # User preferences
+│   │   │   ├── app.routes.ts         # Angular routes
+│   │   │   └── app.config.ts
 │   ├── angular.json
 │   └── package.json
 │
 ├── BeatSync.API/                     # ASP.NET Core 9.0 Web API & SignalR
 │   ├── Controllers/
-│   │   ├── RoomsController.cs        # REST endpoints for room CRUD & validation
-│   │   ├── ParticipantsController.cs # REST endpoints for participants
-│   │   └── TracksController.cs       # REST endpoints for track retrieval and audio upload
+│   │   ├── CinemaController.cs       # Media metadata, sample trailer, and HTTP 206 range audio streaming
+│   │   ├── RoomsController.cs        # Room creation, validation, and listing
+│   │   ├── ParticipantsController.cs # Participants query and device updates
+│   │   └── TracksController.cs       # Audio track retrieval & upload
 │   ├── Hubs/
-│   │   └── RoomHub.cs                # Real-time SignalR Hub (Join, Leave, Play, Pause, Seek, ChangeTrack)
+│   │   └── RoomHub.cs                # Real-time Cinema & Music SignalR hub
 │   ├── Services/
-│   │   ├── IRoomService.cs / RoomService.cs
-│   │   ├── IParticipantService.cs / ParticipantService.cs
-│   │   ├── ITrackService.cs / TrackService.cs
-│   │   └── ISyncService.cs / SyncService.cs (Thread-safe concurrent in-memory playback coordinator)
-│   ├── Repositories/
-│   │   ├── IRoomRepository.cs / RoomRepository.cs
-│   │   ├── IParticipantRepository.cs / ParticipantRepository.cs
-│   │   └── ITrackRepository.cs / TrackRepository.cs
+│   │   ├── ISyncService.cs / SyncService.cs          # Cinema command distributor & state manager
+│   │   ├── IRoomService.cs / RoomService.cs          # Room lifecycle
+│   │   └── IParticipantService.cs / ParticipantService.cs # Speaker assignments
 │   ├── Models/
-│   │   ├── Room.cs                   # Room entity (Id, RoomCode, Name, HostUserId, CreatedAt, IsActive)
-│   │   ├── Participant.cs            # Participant entity (Id, RoomId, Username, ConnectionId, IsHost, IsConnected)
-│   │   └── Track.cs                  # Track entity (Id, Title, Artist, AudioUrl, ArtworkUrl, Duration)
-│   ├── DTOs/
-│   │   ├── CreateRoomDto.cs
-│   │   ├── JoinRoomDto.cs
-│   │   ├── RoomDto.cs
-│   │   ├── ParticipantDto.cs
-│   │   ├── TrackDto.cs
-│   │   ├── PlaybackStateDto.cs
-│   │   └── RoomStateDto.cs
+│   │   ├── Room.cs                   # RoomMode: 'AudioSync' | 'Cinema', MediaTitle, MediaDuration
+│   │   └── Participant.cs            # DeviceRole: 'HostVideo' | 'AudioSpeaker', DevicePosition
+│   ├── DTOs/                         # CinemaPlaybackCommandDto, DevicePositionUpdateDto, DeviceSyncReportDto
 │   ├── Data/
-│   │   ├── BeatSyncDbContext.cs      # EF Core DbContext with model fluent configurations
-│   │   ├── DbInitializer.cs          # Automatic database migrations and track seeding
-│   │   └── AudioGenerator.cs         # Generates royalty-free procedural WAV files on startup
-│   ├── Middleware/
-│   │   └── ExceptionMiddleware.cs    # Global structured error handling middleware
-│   ├── wwwroot/
-│   │   ├── audio/                    # Playable procedural WAV files
-│   │   └── artworks/                 # SVG artwork files
-│   ├── appsettings.json              # SQL Server connection string & logging configuration
-│   └── Program.cs                    # ASP.NET Core dependency injection, CORS, & SignalR mapping
+│   │   ├── BeatSyncDbContext.cs
+│   │   ├── AudioGenerator.cs         # Generates procedural surround cinema test audio
+│   │   └── DbInitializer.cs
+│   └── wwwroot/                      # Compiled Angular browser bundle & audio assets
 │
-├── test-sync.js                      # Multi-client automated SignalR synchronization test
+├── test-cinema-sync.js               # End-to-end 1 Host + 8 Phone Speaker Cinema simulation test
+├── test-sync.js                      # Standard music room regression test
 └── README.md
 ```
 
 ---
 
-## ⚙️ Prerequisites
+## 🏃 Getting Started
 
-Make sure the following tools are installed on your machine:
-- [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
-- [Node.js](https://nodejs.org/) (v18, v20, or v22+) & `npm`
-- [SQL Server](https://www.microsoft.com/sql-server/) or **SQL Server LocalDB** (included with Visual Studio or SQL Server Express)
-- `dotnet-ef` CLI tool:
-  ```bash
-  dotnet tool install --global dotnet-ef
-  ```
-
----
-
-## 🗄️ Database Setup (SQL Server LocalDB)
-
-The application is pre-configured to use **SQL Server LocalDB**.
-
-### Connection String in `BeatSync.API/appsettings.json`:
-```json
-{
-  "ConnectionStrings": {
-    "DefaultConnection": "Server=(localdb)\\MSSQLLocalDB;Database=BeatSyncDb;Trusted_Connection=True;TrustServerCertificate=True;MultipleActiveResultSets=true;"
-  }
-}
-```
-
-> **Note:** If you are using a full SQL Server instance, simply update the `Server` name (e.g., `Server=localhost;Database=BeatSyncDb;User Id=sa;Password=YourPassword;...`).
-
-### Apply EF Core Migrations:
-Open a terminal in `BeatSync.API/`:
+### 1. Database & Migrations (SQL Server LocalDB)
+Ensure .NET 9.0 SDK is installed:
 ```bash
 cd BeatSync.API
 dotnet ef database update
 ```
-*(The backend also automatically applies pending migrations and seeds initial sample tracks on startup via `DbInitializer.cs`.)*
+*(The API will automatically apply any pending migrations and seed sample audio on boot.)*
+
+### 2. Run the Backend API
+```bash
+cd BeatSync.API
+dotnet run --urls "http://localhost:5000"
+```
+The API is available at `http://localhost:5000`.
+
+### 3. Run or Build the Frontend
+In development:
+```bash
+cd BeatSync.Client
+npm install
+npm start
+```
+Or build and host directly via ASP.NET Core `wwwroot`:
+```bash
+cd BeatSync.Client
+npm run build
+Copy-Item -Path "dist\BeatSync.Client\browser\*" -Destination "..\BeatSync.API\wwwroot\" -Recurse -Force
+```
 
 ---
 
-## 🏃 How to Run the Backend (ASP.NET Core API)
+## 🧪 Automated Testing
 
-1. Open a terminal in `BeatSync.API`:
-   ```bash
-   cd BeatSync.API
-   dotnet restore
-   dotnet run --urls "http://localhost:5000"
-   ```
-2. The backend will start on:
-   - **API / SignalR**: `http://localhost:5000`
-   - **Swagger UI**: `http://localhost:5000/swagger`
-   - **SignalR Hub**: `http://localhost:5000/hubs/room`
+### 1. Cinema Surround Multi-Device Test (1 Host + 8 Phone Speakers)
+Simulates a master laptop host and 8 wireless phone speakers joining across all surround channels, verifying scheduled play, seek, dynamic position updates, drift telemetry reporting, WebRTC signaling, and HTTP 206 range streaming:
+```bash
+node test-cinema-sync.js
+```
+**Output**:
+```
+===============================================================
+  BEATSYNC PRO — MULTI-DEVICE SYNC CINEMA VERIFICATION TEST
+  Simulating: 1 Laptop Host + 8 Wireless Phone Speakers
+===============================================================
+✓ Cinema Room created successfully: [NYPPDE] (Mode: Cinema)
+✓ Host joined room [NYPPDE]. ConnectionId: ha_i0Ysv_noe-VLj1mk3Bw
+✓ All 8 phone surround speakers connected and registered!
+✓ Play broadcast verified: 8/8 phones received command: ALL PASS
+✓ Seek broadcast verified: 8/8 phones received seek: ALL PASS
+✓ Position change propagated to Host: PASS
+✓ Host received 8/8 speaker telemetry reports
+✓ Phone 1 received WebRTC offer: PASS
+✓ Host received WebRTC answer back: PASS
+✓ Pause broadcast verified: 8/8 phones received pause: ALL PASS
+✓ Audio Range Streaming test: PASS (HTTP 206 / 200)
 
----
+🎉 ALL 10 CINEMA SURROUND MULTI-DEVICE TESTS PASSED PERFECTLY!
+```
 
-## 💻 How to Run the Frontend (Angular)
-
-1. Open a second terminal in `BeatSync.Client`:
-   ```bash
-   cd BeatSync.Client
-   npm install
-   npm start
-   ```
-   *(Or using Angular CLI directly: `ng serve --port 4200`)*
-
-2. Open your browser and navigate to:
-   ```
-   http://localhost:4200
-   ```
-
----
-
-## 🧪 Testing the Application (Multi-User Verification)
-
-### Automated SignalR Multi-Client Test
-A test script is included to test end-to-end SignalR communication, join/leave events, synchronized playback, and seek events:
+### 2. Standard Audio Room Regression Test
+Verifies that standard music rooms maintain 100% backward compatibility:
 ```bash
 node test-sync.js
 ```
-Expected output:
+**Output**:
 ```
---- Starting BeatSync SignalR Multi-User Test ---
-Host connected to SignalR Hub.
-Listener connected to SignalR Hub.
-Host joined room. Current participants: 1
-[Host Event] UserJoined: silent-wolf IsHost: false
-Listener joined room. Current participants: 2
-Host triggering PLAY at 5.0 seconds...
-[Listener Event] PlaybackStateChanged: { trackId: 1, isPlaying: true, currentPosition: 5, ... }
-Host triggering SEEK to 22.5 seconds...
-[Listener Event] SeekChanged to: 22.5 at server time: 1790675484865
-Host triggering CHANGE TRACK to Track 2...
-[Listener Event] TrackChanged to: Midnight Beats
-Listener leaving room...
-[Host Event] UserLeft: silent-wolf
-
---- Test Summary Results ---
-1. Host received UserJoined: PASS
-2. Listener received Play state: PASS
-3. Listener received Seek event: PASS
-4. Listener received TrackChange event: PASS
-5. Host received UserLeft: PASS
 Overall Result: ALL TESTS PASSED SUCCESSFULLY!
 ```
 
-### Manual Multi-Window Browser Test
-1. **Window 1 (Host)**:
-   - Open `http://localhost:4200` in Google Chrome.
-   - Note the generated username (e.g. `productive-eagle`) or click the shuffle icon to regenerate.
-   - Click **"Create New Room"**.
-   - You are navigated to `/room/ABC123`.
-   - Notice the **"👑 You are the Host"** badge and your username in the **Participants** list.
-   - Click the **Play (▶)** button. The vinyl disc will begin spinning and procedural music plays.
-2. **Window 2 (Participant / Listener)**:
-   - Open an Incognito window or second browser (e.g. Microsoft Edge / Firefox) to `http://localhost:4200`.
-   - Your second user gets a unique username (e.g. `silent-wolf`).
-   - Enter the 6-character room code from Window 1 into the input field and click **"Join Room"**.
-   - Window 2 joins the room:
-     - Shows **"🎧 Listening in sync with productive-eagle"**.
-     - Shows both users in the **Participants** panel.
-     - Audio plays in sync with the host's playback position.
-3. **Test Seek & Track Synchronization**:
-   - In Window 1, click anywhere on the progress bar.
-   - Notice Window 2 immediately seeks to the exact same position!
-   - In Window 1, change the track using the dropdown or the Next button.
-   - Notice Window 2 changes to the new track and begins synchronized playback!
-4. **Test Local Volume**:
-   - Move the volume slider in Window 2.
-   - Notice only Window 2's volume changes; Window 1's volume remains completely unaffected.
-5. **Test Leave & Host Reassignment**:
-   - Close or click "Leave" in Window 1.
-   - Notice Window 2 receives a `UserLeft` notification and is automatically promoted to the new Host, transferring master playback controls!
-
 ---
 
-## 🔒 Security & Validation Details
+## 📱 How to Experience Cinema Mode in Your Home
 
-- Room codes and usernames are validated on both client and server (alphanumeric, length restrictions, prevention of dangerous input).
-- SignalR playback commands (`Play`, `Pause`, `Seek`, `ChangeTrack`) are strictly authorized on the backend: only the connection ID matching the designated room host is permitted to alter master playback state.
-- Uploaded audio files are strictly checked for valid audio extensions (`.mp3`, `.wav`, `.ogg`, `.m4a`, `.aac`) and enforced to a 25MB maximum size.
+1. **Laptop (Host)**:
+   - Go to `http://localhost:5000` (or your local IP / domain).
+   - Click **"🎬 Host Cinema Surround"**.
+   - Load any movie file (MP4/WebM) from your hard drive, or click **"Load Demo Cinema Trailer"**.
+   - Note the 6-letter Room Code (e.g. `ABCXYZ`).
+2. **Phones (Speakers)**:
+   - On each phone's browser, navigate to the room link or enter the Room Code on the home page.
+   - The app automatically detects Cinema mode and routes to the **Surround Speaker HUD**.
+   - Tap **"🔊 Tap to Connect Audio"** to activate the phone speaker.
+   - Position phones around your seating area:
+     - Phone 1: Front Left
+     - Phone 2: Front Center
+     - Phone 3: Front Right
+     - Phone 4: Surround Left
+     - Phone 5: Surround Right
+     - Phone 6: Rear Left
+     - Phone 7: Rear Center
+     - Phone 8: Rear Right
+3. **Enjoy the Movie**:
+   - Hit **Play** on the Laptop.
+   - The laptop plays 4K/HD video and sound while every phone plays the synchronized audio stream in real-time surround sound!
 
 ---
 
 ## 📜 License
-This is an open educational and learning recreation. All assets and procedural audio tracks are royalty-free and copyright-safe.
+This project is open-source and intended for educational and multi-device synchronization research.

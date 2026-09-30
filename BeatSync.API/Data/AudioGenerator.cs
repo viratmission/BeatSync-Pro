@@ -15,6 +15,7 @@ public static class AudioGenerator
         var track1 = Path.Combine(audioDir, "neon_horizon.wav");
         var track2 = Path.Combine(audioDir, "midnight_beats.wav");
         var track3 = Path.Combine(audioDir, "solar_echoes.wav");
+        var cinemaDemo = Path.Combine(audioDir, "cinema_surround_demo.wav");
 
         if (!File.Exists(track1))
         {
@@ -29,6 +30,11 @@ public static class AudioGenerator
         if (!File.Exists(track3))
         {
             File.WriteAllBytes(track3, GenerateAmbientTrack(40)); // 40s track
+        }
+
+        if (!File.Exists(cinemaDemo))
+        {
+            File.WriteAllBytes(cinemaDemo, GenerateCinemaSurroundTrack(60)); // 60s cinema surround demo
         }
     }
 
@@ -165,6 +171,55 @@ public static class AudioGenerator
             ambient *= lfo;
             ambient = Math.Clamp(ambient, -0.95, 0.95);
             samples[i] = (short)(ambient * short.MaxValue);
+        }
+
+        return CreateWavFile(samples, sampleRate);
+    }
+
+    private static byte[] GenerateCinemaSurroundTrack(int durationSeconds)
+    {
+        int sampleRate = 44100;
+        int totalSamples = sampleRate * durationSeconds;
+        short[] samples = new short[totalSamples];
+
+        double[] bassChords = [43.65, 48.99, 55.0, 65.41]; // F1, G1, A1, C2
+        double[] brassChords = [174.61, 220.0, 261.63, 329.63]; // F3, A3, C4, E4
+
+        for (int i = 0; i < totalSamples; i++)
+        {
+            double t = (double)i / sampleRate;
+
+            // 8-second musical cycle
+            double cycleTime = t % 8.0;
+            int chordIndex = ((int)(t / 8.0)) % bassChords.Length;
+
+            double rootBass = bassChords[chordIndex];
+            double rootBrass = brassChords[chordIndex];
+
+            // 1. Deep Subwoofer rumble pulse
+            double subRumble = Math.Sin(2.0 * Math.PI * rootBass * t) * 0.35;
+            subRumble += Math.Sin(2.0 * Math.PI * (rootBass * 0.5) * t) * 0.20;
+
+            // 2. Cinematic Brass Horn ("Braam" on start of each 8s bar)
+            double braamEnv = Math.Max(0.0, Math.Exp(-cycleTime * 0.8));
+            double brass = 0.0;
+            if (braamEnv > 0.01)
+            {
+                brass = (Math.Sin(2.0 * Math.PI * rootBrass * t)
+                      + 0.5 * Math.Sin(2.0 * Math.PI * rootBrass * 2 * t)
+                      + 0.25 * Math.Sin(2.0 * Math.PI * rootBrass * 3 * t)) * braamEnv * 0.35;
+            }
+
+            // 3. Spatial whoosh / sweep effect that pans across frequencies
+            double sweepFreq = 300.0 + 1200.0 * (0.5 + 0.5 * Math.Sin(2.0 * Math.PI * 0.25 * t));
+            double sweep = Math.Sin(2.0 * Math.PI * sweepFreq * t) * 0.08 * (0.5 + 0.5 * Math.Sin(2.0 * Math.PI * 0.125 * t));
+
+            // 4. Subtle ambient drone strings
+            double drone = (Math.Sin(2.0 * Math.PI * (rootBrass * 1.5) * t) + Math.Sin(2.0 * Math.PI * (rootBrass * 2.0) * t)) * 0.12;
+
+            double mixed = (subRumble + brass + sweep + drone);
+            mixed = Math.Clamp(mixed, -0.95, 0.95);
+            samples[i] = (short)(mixed * short.MaxValue);
         }
 
         return CreateWavFile(samples, sampleRate);

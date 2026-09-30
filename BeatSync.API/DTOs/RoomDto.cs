@@ -9,4 +9,8 @@ public class RoomDto
     public DateTime CreatedAt { get; set; }
     public bool IsActive { get; set; }
     public int ParticipantCount { get; set; }
+    public string RoomMode { get; set; } = "AudioSync";
+    public string? MediaTitle { get; set; }
+    public double? MediaDuration { get; set; }
+    public string? MediaType { get; set; }
 }

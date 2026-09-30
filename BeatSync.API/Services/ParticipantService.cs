@@ -15,7 +15,20 @@ public class ParticipantService : IParticipantService
         _roomRepository = roomRepository;
     }
 
-    public async Task<ParticipantDto> AddOrUpdateParticipantAsync(string roomCode, string username, string connectionId, bool isHost)
+    private static readonly string[] DefaultPositions = [
+        "FrontLeft", "FrontRight", "FrontCenter", "SurroundLeft", "SurroundRight", "RearLeft", "RearCenter", "RearRight"
+    ];
+
+    public async Task<ParticipantDto> AddOrUpdateParticipantAsync(
+        string roomCode,
+        string username,
+        string connectionId,
+        bool isHost,
+        string? deviceRole = null,
+        string? devicePosition = null,
+        string? deviceName = null,
+        int volume = 80,
+        bool isMuted = false)
     {
         var room = await _roomRepository.GetByCodeAsync(roomCode)
             ?? throw new InvalidOperationException($"Room with code '{roomCode}' was not found.");
@@ -24,6 +37,19 @@ public class ParticipantService : IParticipantService
 
         // If room has no active participants, this user becomes the host
         bool userIsHost = isHost || !existingInRoom.Any(p => p.IsHost && p.IsConnected);
+
+        // Auto-assign default surround position if not provided
+        var assignedPosition = !string.IsNullOrWhiteSpace(devicePosition)
+            ? devicePosition
+            : DefaultPositions[existingInRoom.Count % DefaultPositions.Length];
+
+        var assignedRole = !string.IsNullOrWhiteSpace(deviceRole)
+            ? deviceRole
+            : (userIsHost ? "HostVideo" : "AudioSpeaker");
+
+        var assignedName = !string.IsNullOrWhiteSpace(deviceName)
+            ? deviceName
+            : $"Phone {existingInRoom.Count + 1}";
 
         // Check if a participant with this username already exists in room
         var existingParticipant = await _participantRepository.GetByRoomAndUsernameAsync(room.Id, username);
@@ -36,6 +62,16 @@ public class ParticipantService : IParticipantService
             {
                 existingParticipant.IsHost = true;
             }
+            if (!string.IsNullOrWhiteSpace(devicePosition))
+            {
+                existingParticipant.DevicePosition = devicePosition;
+            }
+            if (!string.IsNullOrWhiteSpace(deviceRole))
+            {
+                existingParticipant.DeviceRole = deviceRole;
+            }
+            existingParticipant.Volume = volume;
+            existingParticipant.IsMuted = isMuted;
             await _participantRepository.UpdateAsync(existingParticipant);
             return MapToDto(existingParticipant);
         }
@@ -47,7 +83,12 @@ public class ParticipantService : IParticipantService
             ConnectionId = connectionId,
             JoinedAt = DateTime.UtcNow,
             IsHost = userIsHost,
-            IsConnected = true
+            IsConnected = true,
+            DeviceRole = assignedRole,
+            DevicePosition = assignedPosition,
+            DeviceName = assignedName,
+            Volume = volume,
+            IsMuted = isMuted
         };
 
         var created = await _participantRepository.AddAsync(newParticipant);
@@ -149,6 +190,29 @@ public class ParticipantService : IParticipantService
         return MapToDto(target);
     }
 
+    public async Task<ParticipantDto?> UpdateDevicePositionAsync(
+        string roomCode,
+        string connectionId,
+        string position,
+        int volume,
+        bool isMuted,
+        string? deviceName = null)
+    {
+        var participant = await _participantRepository.GetByConnectionIdAsync(connectionId);
+        if (participant == null) return null;
+
+        participant.DevicePosition = position;
+        participant.Volume = volume;
+        participant.IsMuted = isMuted;
+        if (!string.IsNullOrWhiteSpace(deviceName))
+        {
+            participant.DeviceName = deviceName.Trim();
+        }
+
+        await _participantRepository.UpdateAsync(participant);
+        return MapToDto(participant);
+    }
+
     private static ParticipantDto MapToDto(Participant participant)
     {
         return new ParticipantDto
@@ -159,7 +223,12 @@ public class ParticipantService : IParticipantService
             ConnectionId = participant.ConnectionId,
             JoinedAt = participant.JoinedAt,
             IsHost = participant.IsHost,
-            IsConnected = participant.IsConnected
+            IsConnected = participant.IsConnected,
+            DeviceRole = participant.DeviceRole ?? "AudioSpeaker",
+            DevicePosition = participant.DevicePosition ?? "FrontLeft",
+            DeviceName = participant.DeviceName,
+            Volume = participant.Volume,
+            IsMuted = participant.IsMuted
         };
     }
 }

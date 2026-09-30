@@ -5,6 +5,12 @@ import { Participant } from '../models/participant.model';
 import { RoomState } from '../models/room-state.model';
 import { PlaybackState } from '../models/playback-state.model';
 import { Track } from '../models/track.model';
+import {
+  CinemaPlaybackCommand,
+  DevicePositionUpdate,
+  DeviceSyncReport,
+  WebRtcSignal
+} from '../models/cinema.model';
 import { getApiBaseUrl } from './api-config';
 
 export type HubConnectionStatus = 'connected' | 'connecting' | 'reconnecting' | 'disconnected';
@@ -44,6 +50,26 @@ export class SignalRService {
 
   private readonly hostChangedSubject = new Subject<{ username: string; connectionId: string }>();
   public readonly hostChanged$: Observable<{ username: string; connectionId: string }> = this.hostChangedSubject.asObservable();
+
+  // Cinema Real-time Observables
+  private readonly cinemaCommandExecutedSubject = new Subject<{ command: CinemaPlaybackCommand; state: PlaybackState }>();
+  public readonly cinemaCommandExecuted$: Observable<{ command: CinemaPlaybackCommand; state: PlaybackState }> = this.cinemaCommandExecutedSubject.asObservable();
+
+  private readonly devicePositionChangedSubject = new Subject<Participant>();
+  public readonly devicePositionChanged$: Observable<Participant> = this.devicePositionChangedSubject.asObservable();
+
+  private readonly deviceSyncReportedSubject = new Subject<DeviceSyncReport>();
+  public readonly deviceSyncReported$: Observable<DeviceSyncReport> = this.deviceSyncReportedSubject.asObservable();
+
+  private readonly webRtcSignalReceivedSubject = new Subject<WebRtcSignal>();
+  public readonly webRtcSignalReceived$: Observable<WebRtcSignal> = this.webRtcSignalReceivedSubject.asObservable();
+
+  private readonly cinemaHostDisconnectedSubject = new Subject<void>();
+  public readonly cinemaHostDisconnected$: Observable<void> = this.cinemaHostDisconnectedSubject.asObservable();
+
+  public get connectionId(): string | null {
+    return this.hubConnection?.connectionId ?? null;
+  }
 
   public get estimatedServerTime(): number {
     return Date.now() + this.clockOffset;
@@ -136,6 +162,27 @@ export class SignalRService {
     this.hubConnection.on('HostChanged', (username: string, connectionId: string) => {
       this.hostChangedSubject.next({ username, connectionId });
     });
+
+    // Cinema Hub Events
+    this.hubConnection.on('CinemaCommandExecuted', (command: CinemaPlaybackCommand, state: PlaybackState) => {
+      this.cinemaCommandExecutedSubject.next({ command, state });
+    });
+
+    this.hubConnection.on('DevicePositionChanged', (participant: Participant) => {
+      this.devicePositionChangedSubject.next(participant);
+    });
+
+    this.hubConnection.on('DeviceSyncReported', (report: DeviceSyncReport) => {
+      this.deviceSyncReportedSubject.next(report);
+    });
+
+    this.hubConnection.on('WebRtcSignalReceived', (signal: WebRtcSignal) => {
+      this.webRtcSignalReceivedSubject.next(signal);
+    });
+
+    this.hubConnection.on('CinemaHostDisconnected', () => {
+      this.cinemaHostDisconnectedSubject.next();
+    });
   }
 
   public async calibrateClock(): Promise<void> {
@@ -166,6 +213,28 @@ export class SignalRService {
     return await this.hubConnection!.invoke<RoomState>('JoinRoom', roomCode, username);
   }
 
+  public async joinCinemaRoom(
+    roomCode: string,
+    username: string,
+    deviceRole: 'HostVideo' | 'AudioSpeaker' = 'AudioSpeaker',
+    devicePosition: string = 'FrontLeft',
+    deviceName?: string,
+    volume: number = 80,
+    isMuted: boolean = false
+  ): Promise<RoomState> {
+    await this.startConnection();
+    return await this.hubConnection!.invoke<RoomState>(
+      'JoinCinemaRoom',
+      roomCode,
+      username,
+      deviceRole,
+      devicePosition,
+      deviceName ?? null,
+      volume,
+      isMuted
+    );
+  }
+
   public async leaveRoom(roomCode: string): Promise<void> {
     if (!this.isConnected) return;
     try {
@@ -193,6 +262,27 @@ export class SignalRService {
   public async changeTrack(roomCode: string, trackId: number): Promise<void> {
     if (!this.isConnected) return;
     await this.hubConnection!.invoke('ChangeTrack', roomCode, trackId);
+  }
+
+  // Cinema Hub Invokes
+  public async sendCinemaCommand(roomCode: string, command: CinemaPlaybackCommand): Promise<void> {
+    if (!this.isConnected) return;
+    await this.hubConnection!.invoke('CinemaPlaybackCommand', roomCode, command);
+  }
+
+  public async updateDevicePosition(roomCode: string, update: DevicePositionUpdate): Promise<void> {
+    if (!this.isConnected) return;
+    await this.hubConnection!.invoke('UpdateDevicePosition', roomCode, update);
+  }
+
+  public async reportDeviceSync(roomCode: string, report: DeviceSyncReport): Promise<void> {
+    if (!this.isConnected) return;
+    await this.hubConnection!.invoke('ReportDeviceSync', roomCode, report);
+  }
+
+  public async sendWebRtcSignal(roomCode: string, signal: WebRtcSignal): Promise<void> {
+    if (!this.isConnected) return;
+    await this.hubConnection!.invoke('SendWebRtcSignal', roomCode, signal);
   }
 
   public async stop(): Promise<void> {

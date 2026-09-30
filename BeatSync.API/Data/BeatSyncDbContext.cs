@@ -26,6 +26,10 @@ public class BeatSyncDbContext : DbContext
             entity.Property(r => r.HostUserId).IsRequired().HasMaxLength(50);
             entity.Property(r => r.CreatedAt).IsRequired();
             entity.Property(r => r.IsActive).IsRequired();
+            entity.Property(r => r.RoomMode).IsRequired().HasMaxLength(20).HasDefaultValue("AudioSync");
+            entity.Property(r => r.MediaTitle).HasMaxLength(200);
+            entity.Property(r => r.MediaDuration);
+            entity.Property(r => r.MediaType).HasMaxLength(50);
 
             entity.HasMany(r => r.Participants)
                   .WithOne(p => p.Room)
@@ -41,6 +45,11 @@ public class BeatSyncDbContext : DbContext
             entity.Property(p => p.JoinedAt).IsRequired();
             entity.Property(p => p.IsHost).IsRequired();
             entity.Property(p => p.IsConnected).IsRequired();
+            entity.Property(p => p.DeviceRole).IsRequired().HasMaxLength(20).HasDefaultValue("AudioSpeaker");
+            entity.Property(p => p.DevicePosition).IsRequired().HasMaxLength(30).HasDefaultValue("FrontLeft");
+            entity.Property(p => p.DeviceName).HasMaxLength(50);
+            entity.Property(p => p.Volume).HasDefaultValue(80);
+            entity.Property(p => p.IsMuted).HasDefaultValue(false);
         });
 
         modelBuilder.Entity<Track>(entity =>

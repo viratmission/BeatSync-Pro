@@ -36,7 +36,11 @@ public class RoomService : IRoomService
             Name = string.IsNullOrWhiteSpace(dto.Name) ? $"{dto.HostUsername}'s Room" : dto.Name.Trim(),
             HostUserId = dto.HostUsername.Trim(),
             CreatedAt = DateTime.UtcNow,
-            IsActive = true
+            IsActive = true,
+            RoomMode = string.IsNullOrWhiteSpace(dto.RoomMode) ? "AudioSync" : dto.RoomMode.Trim(),
+            MediaTitle = dto.MediaTitle,
+            MediaDuration = dto.MediaDuration,
+            MediaType = dto.RoomMode == "Cinema" ? "video" : "audio"
         };
 
         var created = await _roomRepository.CreateAsync(room);
@@ -97,7 +101,11 @@ public class RoomService : IRoomService
             HostUserId = room.HostUserId,
             CreatedAt = room.CreatedAt,
             IsActive = room.IsActive,
-            ParticipantCount = room.Participants?.Count(p => p.IsConnected) ?? 0
+            ParticipantCount = room.Participants?.Count(p => p.IsConnected) ?? 0,
+            RoomMode = room.RoomMode ?? "AudioSync",
+            MediaTitle = room.MediaTitle,
+            MediaDuration = room.MediaDuration,
+            MediaType = room.MediaType
         };
     }
 }

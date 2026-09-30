@@ -50,4 +50,27 @@ export class RoomService {
     }
     return this.http.post<Track>(`${this.baseUrl}/api/tracks/upload`, formData);
   }
+
+  // Cinema Media API endpoints
+  getSampleCinemaMedia(): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/api/cinema/sample-media`);
+  }
+
+  setRoomMedia(roomCode: string, title: string, duration: number, username?: string): Observable<Room> {
+    return this.http.post<Room>(`${this.baseUrl}/api/cinema/rooms/${roomCode.toUpperCase()}/media`, {
+      title,
+      duration,
+      username
+    });
+  }
+
+  uploadCinemaAudio(roomCode: string, file: File): Observable<any> {
+    const formData = new FormData();
+    formData.append('file', file);
+    return this.http.post<any>(`${this.baseUrl}/api/cinema/rooms/${roomCode.toUpperCase()}/audio`, formData);
+  }
+
+  getCinemaAudioStreamUrl(roomCode: string): string {
+    return `${this.baseUrl}/api/cinema/rooms/${roomCode.toUpperCase()}/audio`;
+  }
 }

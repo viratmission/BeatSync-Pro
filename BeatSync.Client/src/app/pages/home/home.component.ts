@@ -81,10 +81,38 @@ import { FooterComponent } from '../../shared/components/footer/footer.component
             <span>or start a new session</span>
           </div>
 
-          <!-- Create Room Button -->
+          <!-- Create Cinema Experience (Laptop Host) -->
+          <button
+            class="btn-cinema create-cinema-btn"
+            [disabled]="isCreating || isCreatingCinema"
+            (click)="createCinemaRoom()"
+          >
+            @if (isCreatingCinema) {
+              <span class="spinner"></span> Initializing Cinema...
+            } @else {
+              <div class="cinema-icon-badge">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect>
+                  <line x1="7" y1="2" x2="7" y2="22"></line>
+                  <line x1="17" y1="2" x2="17" y2="22"></line>
+                  <line x1="2" y1="12" x2="22" y2="12"></line>
+                  <line x1="2" y1="7" x2="7" y2="7"></line>
+                  <line x1="2" y1="17" x2="7" y2="17"></line>
+                  <line x1="17" y1="17" x2="22" y2="17"></line>
+                  <line x1="17" y1="7" x2="22" y2="7"></line>
+                </svg>
+              </div>
+              <div class="cinema-btn-text">
+                <span class="cinema-btn-title">Host Cinema Surround</span>
+                <span class="cinema-btn-sub">Play video on laptop + sync phones as speakers</span>
+              </div>
+            }
+          </button>
+
+          <!-- Create Standard Audio Room Button -->
           <button
             class="btn-secondary create-btn"
-            [disabled]="isCreating"
+            [disabled]="isCreating || isCreatingCinema"
             (click)="createRoom()"
           >
             @if (isCreating) {
@@ -94,7 +122,7 @@ import { FooterComponent } from '../../shared/components/footer/footer.component
                 <line x1="12" y1="5" x2="12" y2="19" />
                 <line x1="5" y1="12" x2="19" y2="12" />
               </svg>
-              Create New Room
+              Create Standard Music Room
             }
           </button>
 
@@ -281,8 +309,56 @@ import { FooterComponent } from '../../shared/components/footer/footer.component
       flex: 1;
       border-bottom: 1px solid #e2e8f0;
     }
-    .divider span {
-      padding: 0 12px;
+    .btn-cinema {
+      min-height: 54px;
+      padding: 10px 16px;
+      background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+      border: 1px solid rgba(99, 102, 241, 0.35);
+      border-radius: 12px;
+      color: #ffffff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      transition: all 0.2s ease;
+      text-align: left;
+      box-shadow: 0 4px 14px rgba(79, 70, 229, 0.12);
+    }
+    .btn-cinema:hover:not(:disabled) {
+      background: linear-gradient(135deg, #1e293b 0%, #312e81 100%);
+      border-color: #818cf8;
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(79, 70, 229, 0.2);
+    }
+    .btn-cinema:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .cinema-icon-badge {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #0284c7 0%, #6366f1 100%);
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .cinema-btn-text {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .cinema-btn-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: -0.01em;
+    }
+    .cinema-btn-sub {
+      font-size: 11px;
+      color: #94a3b8;
     }
     .btn-secondary {
       height: 48px;
@@ -414,6 +490,7 @@ export class HomeComponent implements OnInit {
   useNativeSpeakers = true;
   isJoining = false;
   isCreating = false;
+  isCreatingCinema = false;
   errorMessage = '';
 
   constructor() {
@@ -463,12 +540,38 @@ export class HomeComponent implements OnInit {
     this.errorMessage = '';
 
     try {
-      // Validate room existence via backend
-      await this.roomService.getRoom(this.roomCode).toPromise();
-      this.router.navigate(['/room', this.roomCode]);
+      // Validate room existence and inspect roomMode
+      const room = await this.roomService.getRoom(this.roomCode).toPromise();
+      if (room && room.roomMode === 'Cinema') {
+        this.router.navigate(['/cinema/device', this.roomCode]);
+      } else {
+        this.router.navigate(['/room', this.roomCode]);
+      }
     } catch (err: any) {
       this.isJoining = false;
       this.errorMessage = err?.error?.message || 'Room not found. Check the code and try again.';
+      this.toastService.error(this.errorMessage);
+    }
+  }
+
+  async createCinemaRoom(): Promise<void> {
+    this.saveUsername();
+    this.isCreatingCinema = true;
+    this.errorMessage = '';
+
+    try {
+      const room = await this.roomService.createRoom({
+        hostUsername: this.userService.currentUsername,
+        roomMode: 'Cinema'
+      }).toPromise();
+
+      if (room && room.roomCode) {
+        this.toastService.success(`Cinema Room ${room.roomCode} created!`);
+        this.router.navigate(['/cinema/host', room.roomCode]);
+      }
+    } catch (err: any) {
+      this.isCreatingCinema = false;
+      this.errorMessage = err?.error?.message || 'Failed to create Cinema room. Please try again.';
       this.toastService.error(this.errorMessage);
     }
   }
@@ -480,7 +583,8 @@ export class HomeComponent implements OnInit {
 
     try {
       const room = await this.roomService.createRoom({
-        hostUsername: this.userService.currentUsername
+        hostUsername: this.userService.currentUsername,
+        roomMode: 'AudioSync'
       }).toPromise();
 
       if (room && room.roomCode) {
