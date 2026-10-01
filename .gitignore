@@ -5,4 +5,6 @@
 *.suo
 node_modules/
 .angular/
-dist/
+dist/*.mp4
+*.mp4.*
+uploaded_media/

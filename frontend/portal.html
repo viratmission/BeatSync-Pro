@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BeatSync-Pro — Device Selector</title>
+  <link rel="stylesheet" href="/shared/css/theme.css">
+  <style>
+    .portal-container {
+      max-width: 600px;
+      margin: 80px auto;
+      padding: 32px 24px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+    .portal-options {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 16px;
+    }
+    @media (max-width: 500px) {
+      .portal-options { grid-template-columns: 1fr; }
+    }
+    .portal-card {
+      padding: 24px;
+      border-radius: var(--radius-md);
+      text-decoration: none;
+      color: inherit;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      transition: all var(--transition-normal);
+      border: 1px solid var(--border-glass);
+      background: var(--bg-card);
+    }
+    .portal-card:hover {
+      transform: translateY(-4px);
+      border-color: var(--accent-primary);
+      box-shadow: var(--glow-primary);
+    }
+    .portal-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: rgba(99, 102, 241, 0.15);
+      color: var(--accent-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="portal-container glass-panel">
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+      <span class="badge badge-offline badge-pulse">100% Offline LAN Network</span>
+      <h1 style="font-size: 1.75rem; font-weight: 700;">BeatSync-Pro</h1>
+      <p style="color: var(--text-muted); font-size: 0.9rem;">
+        Choose your device role to join the synchronized cinema session.
+      </p>
+    </div>
+
+    <div class="portal-options">
+      <!-- Laptop Host -->
+      <a href="/host" class="portal-card" id="hostCard">
+        <div class="portal-icon">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+            <line x1="2" y1="20" x2="22" y2="20"></line>
+          </svg>
+        </div>
+        <strong style="font-size: 1rem;">Master Laptop</strong>
+        <span style="font-size: 0.75rem; color: var(--text-muted);">
+          Host the movie and control play, pause, and seek.
+        </span>
+      </a>
+
+      <!-- Phone Receiver -->
+      <a href="/player" class="portal-card" id="playerCard">
+        <div class="portal-icon" style="background: rgba(6, 182, 212, 0.15); color: var(--accent-cyan);">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+            <line x1="12" y1="18" x2="12.01" y2="18"></line>
+          </svg>
+        </div>
+        <strong style="font-size: 1rem;">Phone Receiver</strong>
+        <span style="font-size: 0.75rem; color: var(--text-muted);">
+          Watch video and hear synchronized audio on this device.
+        </span>
+      </a>
+    </div>
+  </div>
+
+  <script>
+    // Preserve token query param in links
+    const token = new URLSearchParams(window.location.search).get('token');
+    if (token) {
+      document.getElementById('hostCard').href = `/host?token=${token}`;
+      document.getElementById('playerCard').href = `/player?token=${token}`;
+    }
+  </script>
+</body>
+</html>
