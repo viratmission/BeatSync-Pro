@@ -1,0 +1,31 @@
+# Netlify only hosts the static frontend. The FastAPI/WebSocket server in
+# backend/main.py is meant to run locally on the LAN and is not deployed.
+[build]
+  command = "echo 'No build step: publishing static frontend'"
+  publish = "frontend"
+
+# Mirror the URL layout served by backend/server/app.py
+[[redirects]]
+  from = "/"
+  to = "/portal.html"
+  status = 200
+
+[[redirects]]
+  from = "/portal"
+  to = "/portal.html"
+  status = 200
+
+[[redirects]]
+  from = "/player"
+  to = "/receiver/index.html"
+  status = 200
+
+[[redirects]]
+  from = "/static/host/*"
+  to = "/host/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/static/receiver/*"
+  to = "/receiver/:splat"
+  status = 200
