@@ -1,0 +1,11 @@
+# Netlify Redirects for BeatSync-Pro Frontend Portal
+/static/host/*      /host/:splat         200
+/static/receiver/*  /receiver/:splat     200
+/host/*             /host/index.html     200
+/host               /host/index.html     200
+/player/*           /receiver/index.html 200
+/player             /receiver/index.html 200
+/receiver/*         /receiver/index.html 200
+/receiver           /receiver/index.html 200
+/portal             /portal.html         200
+/                   /index.html          200

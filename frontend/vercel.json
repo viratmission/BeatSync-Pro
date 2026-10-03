@@ -1,0 +1,14 @@
+{
+  "cleanUrls": true,
+  "rewrites": [
+    { "source": "/host", "destination": "/host/index.html" },
+    { "source": "/host/:match*", "destination": "/host/index.html" },
+    { "source": "/player", "destination": "/receiver/index.html" },
+    { "source": "/player/:match*", "destination": "/receiver/index.html" },
+    { "source": "/receiver", "destination": "/receiver/index.html" },
+    { "source": "/receiver/:match*", "destination": "/receiver/index.html" },
+    { "source": "/static/host/:path*", "destination": "/host/:path*" },
+    { "source": "/static/receiver/:path*", "destination": "/receiver/:path*" },
+    { "source": "/", "destination": "/index.html" }
+  ]
+}

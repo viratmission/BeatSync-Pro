@@ -1,469 +1,1684 @@
 """
-WebSocket Signaling & Timeline Broadcast Manager.
-Coordinates real-time messaging, clock synchronization, telemetry, and device state.
+BeatSync-Pro LAN WebSocket Signaling Manager.
+
+Protocol v2 responsibilities:
+
+1. Register the laptop host.
+2. Register receiver phones.
+3. Maintain connected clients.
+4. Relay WebRTC signaling messages.
+5. Synchronize authoritative playback state.
+6. Perform NTP-style clock ping/pong.
+7. Broadcast session state.
+8. Relay telemetry.
+9. Enforce host-only playback control.
+10. Cleanly remove disconnected clients.
+
+This server is intentionally LAN-only.
+
+No STUN.
+No TURN.
+No cloud signaling.
+No external service dependency.
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import time
-from typing import Dict, Optional, Any, List
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
 from fastapi import WebSocket, WebSocketDisconnect
 
-from shared.models.session import ClientState, WSMessage
+from backend.sync.clock import MasterClock
+from backend.sync.session import session_manager
 from shared.protocol.messages import (
     MessageType,
     PROTOCOL_VERSION,
-    SYNC_INTERVAL_MS,
+    DEFAULT_ROOM_ID,
+    DEFAULT_START_LEAD_MS,
     HEARTBEAT_INTERVAL_MS,
     CLIENT_TIMEOUT_MS,
 )
-from backend.sync.clock import MasterClock
-from backend.sync.session import SessionManager
-
-logger = logging.getLogger("BeatSync.Signaling")
 
 
-class WebSocketManager:
-    def __init__(self, session_manager: SessionManager):
-        self.session_manager = session_manager
-        # clientId -> (WebSocket, ClientState)
-        self.clients: Dict[str, tuple[WebSocket, ClientState]] = {}
-        # host WebSocket reference
-        self.host_ws: Optional[WebSocket] = None
+logger = logging.getLogger("beatsync.websocket")
+
+
+HOST_CLIENT_ID = "host-master"
+
+
+@dataclass
+class ConnectedClient:
+    """
+    Runtime information for one WebSocket client.
+    """
+
+    client_id: str
+    websocket: WebSocket
+    role: str = "receiver"
+    device_name: str = "Unknown Device"
+    room_id: str = DEFAULT_ROOM_ID
+    ip_address: Optional[str] = None
+
+    connected_at: float = 0.0
+    last_seen: float = 0.0
+
+    latency_ms: float = 0.0
+    clock_offset_ms: float = 0.0
+    drift_ms: float = 0.0
+    calibration_offset_ms: float = 0.0
+    playback_state: str = "paused"
+
+    def __post_init__(self) -> None:
+        now = MasterClock.now_ms()
+
+        if self.connected_at <= 0:
+            self.connected_at = now
+
+        if self.last_seen <= 0:
+            self.last_seen = now
+
+
+class ConnectionManager:
+    """
+    Central WebSocket connection manager.
+
+    One instance is shared by the entire FastAPI application.
+    """
+
+    def __init__(self) -> None:
+        self.clients: Dict[str, ConnectedClient] = {}
         self.host_client_id: Optional[str] = None
-        self._sync_task: Optional[asyncio.Task] = None
-        self._cleanup_task: Optional[asyncio.Task] = None
 
-    def start_background_tasks(self):
-        if self._sync_task is None or self._sync_task.done():
-            self._sync_task = asyncio.create_task(self._periodic_sync_loop())
-        if self._cleanup_task is None or self._cleanup_task.done():
-            self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop())
+        self._lock = asyncio.Lock()
+        self._broadcast_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
 
-    def stop_background_tasks(self):
-        if self._sync_task and not self._sync_task.done():
-            self._sync_task.cancel()
-        if self._cleanup_task and not self._cleanup_task.done():
-            self._cleanup_task.cancel()
+        self._running = False
 
-    async def _send_json(self, ws: WebSocket, data: Dict[str, Any]):
-        try:
-            await ws.send_text(json.dumps(data))
-        except Exception as e:
-            logger.debug(f"Failed to send to websocket: {e}")
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
-    async def broadcast_to_receivers(self, data: Dict[str, Any]):
-        dead_clients = []
-        for client_id, (ws, state) in list(self.clients.items()):
-            if state.role == "receiver":
+    async def start(self) -> None:
+        """
+        Start background synchronization and heartbeat loops.
+        """
+
+        if self._running:
+            return
+
+        self._running = True
+
+        self._broadcast_task = asyncio.create_task(
+            self._periodic_session_broadcast()
+        )
+
+        self._heartbeat_task = asyncio.create_task(
+            self._periodic_heartbeat()
+        )
+
+        logger.info("WebSocket manager started")
+
+    async def stop(self) -> None:
+        """
+        Stop background tasks and close all connections.
+        """
+
+        self._running = False
+
+        tasks = [
+            self._broadcast_task,
+            self._heartbeat_task,
+        ]
+
+        for task in tasks:
+            if task is not None:
+                task.cancel()
+
+        for task in tasks:
+            if task is not None:
                 try:
-                    await ws.send_text(json.dumps(data))
+                    await task
+                except asyncio.CancelledError:
+                    pass
                 except Exception:
-                    dead_clients.append(client_id)
-        for dead_id in dead_clients:
-            await self.disconnect_client(dead_id)
+                    logger.exception(
+                        "Error while stopping WebSocket task"
+                    )
 
-    async def broadcast_to_all(self, data: Dict[str, Any]):
-        dead_clients = []
-        for client_id, (ws, _) in list(self.clients.items()):
+        self._broadcast_task = None
+        self._heartbeat_task = None
+
+        async with self._lock:
+            clients = list(self.clients.values())
+
+            self.clients.clear()
+            self.host_client_id = None
+
+        for client in clients:
             try:
-                await ws.send_text(json.dumps(data))
+                await client.websocket.close()
             except Exception:
-                dead_clients.append(client_id)
-        for dead_id in dead_clients:
-            await self.disconnect_client(dead_id)
+                pass
 
-    async def send_to_host(self, data: Dict[str, Any]):
-        if self.host_ws:
+        logger.info("WebSocket manager stopped")
+
+    # ------------------------------------------------------------------
+    # Client registration
+    # ------------------------------------------------------------------
+
+    async def register(
+        self,
+        websocket: WebSocket,
+        client_id: str,
+        role: str,
+        device_name: str,
+        room_id: str,
+        ip_address: Optional[str],
+    ) -> ConnectedClient:
+        """
+        Register or replace a client connection.
+        """
+
+        now = MasterClock.now_ms()
+
+        client = ConnectedClient(
+            client_id=client_id,
+            websocket=websocket,
+            role=role,
+            device_name=device_name or "Unknown Device",
+            room_id=room_id or DEFAULT_ROOM_ID,
+            ip_address=ip_address,
+            connected_at=now,
+            last_seen=now,
+        )
+
+        old_client: Optional[ConnectedClient] = None
+
+        async with self._lock:
+            old_client = self.clients.get(client_id)
+
+            self.clients[client_id] = client
+
+            if role == "host":
+                self.host_client_id = client_id
+
+        if old_client is not None and old_client.websocket is not websocket:
             try:
-                await self.host_ws.send_text(json.dumps(data))
-            except Exception as e:
-                logger.warning(f"Failed to send to host: {e}")
-                self.host_ws = None
+                await old_client.websocket.close()
+            except Exception:
+                pass
 
-    def get_client_list_payload(self) -> List[Dict[str, Any]]:
-        client_list = []
-        for client_id, (_, state) in self.clients.items():
-            if state.role == "receiver":
-                client_list.append(state.model_dump())
-        return client_list
+        logger.info(
+            "Client registered: id=%s role=%s device=%s ip=%s",
+            client_id,
+            role,
+            device_name,
+            ip_address,
+        )
 
-    async def broadcast_client_list(self):
-        payload = {
-            "version": PROTOCOL_VERSION,
-            "type": MessageType.CLIENT_LIST.value,
-            "clients": self.get_client_list_payload(),
-            "serverTime": MasterClock.now_ms()
-        }
-        await self.send_to_host(payload)
+        return client
 
-    async def disconnect_client(self, client_id: str):
-        if client_id in self.clients:
-            _, state = self.clients.pop(client_id)
-            logger.info(f"Client disconnected: {state.deviceName} [{client_id}]")
-            if self.host_client_id == client_id:
-                self.host_ws = None
+    async def unregister(
+        self,
+        client_id: str,
+        websocket: Optional[WebSocket] = None,
+    ) -> None:
+        """
+        Remove a client safely.
+
+        If websocket is provided, do not remove a newer connection
+        that reused the same client ID.
+        """
+
+        removed = False
+        removed_client: Optional[ConnectedClient] = None
+
+        async with self._lock:
+            current = self.clients.get(client_id)
+
+            if current is None:
+                return
+
+            if websocket is not None and current.websocket is not websocket:
+                return
+
+            removed_client = self.clients.pop(client_id, None)
+
+            if client_id == self.host_client_id:
                 self.host_client_id = None
-                logger.info("Host disconnected")
+
+            removed = removed_client is not None
+
+        if removed:
+            logger.info(
+                "Client disconnected: id=%s role=%s",
+                client_id,
+                removed_client.role if removed_client else "unknown",
+            )
+
             await self.broadcast_client_list()
 
-    async def _periodic_sync_loop(self):
-        """Broadcasts authoritative timeline sync message every SYNC_INTERVAL_MS."""
-        while True:
-            try:
-                await asyncio.sleep(SYNC_INTERVAL_MS / 1000.0)
-                if self.clients:
-                    sync_data = self.session_manager.get_sync_payload()
-                    await self.broadcast_to_receivers(sync_data)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in sync loop: {e}")
+    # ------------------------------------------------------------------
+    # Basic helpers
+    # ------------------------------------------------------------------
 
-    async def _periodic_cleanup_loop(self):
-        """Cleans up timed-out receiver clients."""
-        while True:
-            try:
-                await asyncio.sleep(HEARTBEAT_INTERVAL_MS / 1000.0)
-                now = MasterClock.now_ms()
-                to_remove = []
-                for client_id, (_, state) in list(self.clients.items()):
-                    # Never timeout host in cleanup loop; disconnection handles it
-                    if state.role == "host":
-                        continue
-                    if now - state.lastSeen > CLIENT_TIMEOUT_MS:
-                        to_remove.append(client_id)
-                for client_id in to_remove:
-                    logger.info(f"Client {client_id} timed out (lastSeen > {CLIENT_TIMEOUT_MS}ms)")
-                    await self.disconnect_client(client_id)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in cleanup loop: {e}")
+    def get_host(self) -> Optional[ConnectedClient]:
+        """
+        Return the currently registered host.
+        """
 
-    async def handle_connection(self, websocket: WebSocket):
-        await websocket.accept()
-        current_client_id: Optional[str] = None
-        client_ip = websocket.client.host if websocket.client else "unknown"
+        if self.host_client_id is None:
+            return None
+
+        return self.clients.get(self.host_client_id)
+
+    def get_client(self, client_id: str) -> Optional[ConnectedClient]:
+        """
+        Return a connected client by ID.
+        """
+
+        return self.clients.get(client_id)
+
+    def get_receiver_clients(self) -> list[ConnectedClient]:
+        """
+        Return all currently connected receiver clients.
+        """
+
+        return [
+            client
+            for client in self.clients.values()
+            if client.role == "receiver"
+        ]
+
+    def touch(self, client_id: str) -> None:
+        """
+        Update last-seen timestamp.
+        """
+
+        client = self.clients.get(client_id)
+
+        if client is not None:
+            client.last_seen = MasterClock.now_ms()
+
+    # ------------------------------------------------------------------
+    # Sending
+    # ------------------------------------------------------------------
+
+    async def send_json(
+        self,
+        websocket: WebSocket,
+        message: Dict[str, Any],
+    ) -> bool:
+        """
+        Send JSON safely.
+        """
 
         try:
-            while True:
-                text_data = await websocket.receive_text()
-                try:
-                    raw_msg = json.loads(text_data)
-                except Exception:
-                    await self._send_json(websocket, {
+            await websocket.send_json(message)
+            return True
+
+        except Exception as exc:
+            logger.warning(
+                "WebSocket send failed: %s",
+                exc,
+            )
+            return False
+
+    async def send_to_client(
+        self,
+        client_id: str,
+        message: Dict[str, Any],
+    ) -> bool:
+        """
+        Send a message to one client.
+        """
+
+        client = self.clients.get(client_id)
+
+        if client is None:
+            return False
+
+        return await self.send_json(
+            client.websocket,
+            message,
+        )
+
+    async def broadcast(
+        self,
+        message: Dict[str, Any],
+        role: Optional[str] = None,
+        exclude_client_id: Optional[str] = None,
+    ) -> None:
+        """
+        Broadcast a message to connected clients.
+        """
+
+        clients = list(self.clients.values())
+
+        send_tasks = []
+
+        for client in clients:
+            if exclude_client_id is not None:
+                if client.client_id == exclude_client_id:
+                    continue
+
+            if role is not None:
+                if client.role != role:
+                    continue
+
+            send_tasks.append(
+                self.send_json(
+                    client.websocket,
+                    message,
+                )
+            )
+
+        if send_tasks:
+            await asyncio.gather(
+                *send_tasks,
+                return_exceptions=True,
+            )
+
+    # ------------------------------------------------------------------
+    # Session state
+    # ------------------------------------------------------------------
+
+    def _session_payload(self) -> Dict[str, Any]:
+        """
+        Get authoritative session state.
+
+        The session manager owns the playback timeline.
+        """
+
+        payload = session_manager.get_sync_payload()
+
+        if isinstance(payload, dict):
+            return payload
+
+        if hasattr(payload, "model_dump"):
+            return payload.model_dump()
+
+        if hasattr(payload, "dict"):
+            return payload.dict()
+
+        return dict(payload)
+
+    async def send_session_state(
+        self,
+        client_id: str,
+    ) -> None:
+        """
+        Send the current authoritative session state to one client.
+        """
+
+        payload = self._session_payload()
+
+        message = {
+            "version": PROTOCOL_VERSION,
+            "type": MessageType.SESSION_STATE.value,
+            **payload,
+        }
+
+        await self.send_to_client(
+            client_id,
+            message,
+        )
+
+    async def broadcast_session_state(self) -> None:
+        """
+        Broadcast authoritative session state to all receivers.
+        """
+
+        payload = self._session_payload()
+
+        message = {
+            "version": PROTOCOL_VERSION,
+            "type": MessageType.SESSION_STATE.value,
+            **payload,
+        }
+
+        await self.broadcast(
+            message,
+            role="receiver",
+        )
+
+    # ------------------------------------------------------------------
+    # Client list
+    # ------------------------------------------------------------------
+
+    def _client_to_dict(
+        self,
+        client: ConnectedClient,
+    ) -> Dict[str, Any]:
+        """
+        Convert runtime client state into protocol data.
+        """
+
+        return {
+            "clientId": client.client_id,
+            "deviceName": client.device_name,
+            "role": client.role,
+            "connected": True,
+            "ipAddress": client.ip_address,
+            "latencyMs": round(client.latency_ms, 2),
+            "clockOffsetMs": round(client.clock_offset_ms, 2),
+            "driftMs": round(client.drift_ms, 2),
+            "calibrationOffsetMs": round(
+                client.calibration_offset_ms,
+                2,
+            ),
+            "playbackState": client.playback_state,
+            "joinedAt": client.connected_at,
+            "lastSeen": client.last_seen,
+        }
+
+    def _client_list_payload(self) -> list[Dict[str, Any]]:
+        return [
+            self._client_to_dict(client)
+            for client in self.clients.values()
+            if client.role == "receiver"
+        ]
+
+    async def broadcast_client_list(self) -> None:
+        """
+        Send the current receiver list to host and receivers.
+        """
+
+        message = {
+            "version": PROTOCOL_VERSION,
+            "type": MessageType.CLIENT_LIST.value,
+            "clients": self._client_list_payload(),
+            "serverTime": MasterClock.now_ms(),
+        }
+
+        await self.broadcast(message)
+
+    # ------------------------------------------------------------------
+    # Welcome
+    # ------------------------------------------------------------------
+
+    async def send_welcome(
+        self,
+        client: ConnectedClient,
+    ) -> None:
+        """
+        Send welcome message after successful registration.
+        """
+
+        session = self._session_payload()
+
+        message = {
+            "version": PROTOCOL_VERSION,
+            "type": MessageType.WELCOME.value,
+            "clientId": client.client_id,
+            "role": client.role,
+            "roomId": client.room_id,
+            "serverTime": MasterClock.now_ms(),
+            "clients": self._client_list_payload(),
+            "session": session,
+        }
+
+        await self.send_json(
+            client.websocket,
+            message,
+        )
+
+    # ------------------------------------------------------------------
+    # Authorization
+    # ------------------------------------------------------------------
+
+    def is_host(self, client_id: str) -> bool:
+        return (
+            self.host_client_id is not None
+            and self.host_client_id == client_id
+        )
+
+    async def require_host(
+        self,
+        client_id: str,
+        websocket: WebSocket,
+    ) -> bool:
+        """
+        Ensure a playback-control message originates from the host.
+        """
+
+        if self.is_host(client_id):
+            return True
+
+        await self.send_json(
+            websocket,
+            {
+                "version": PROTOCOL_VERSION,
+                "type": MessageType.ERROR.value,
+                "error": "Only the host can control playback.",
+            },
+        )
+
+        return False
+
+    # ------------------------------------------------------------------
+    # Clock synchronization
+    # ------------------------------------------------------------------
+
+    async def handle_clock_ping(
+        self,
+        client: ConnectedClient,
+        message: Dict[str, Any],
+    ) -> None:
+        """
+        Handle NTP-style clock ping.
+
+        Client sends:
+
+            clientTime
+
+        Server responds with:
+
+            clientTime
+            serverTime
+            serverReceiveTime
+            serverSendTime
+        """
+
+        client_time = message.get("clientTime")
+
+        receive_time = MasterClock.now_ms()
+
+        send_message = {
+            "version": PROTOCOL_VERSION,
+            "type": MessageType.CLOCK_PONG.value,
+            "clientTime": client_time,
+            "serverTime": receive_time,
+            "serverReceiveTime": receive_time,
+            "serverSendTime": MasterClock.now_ms(),
+        }
+
+        await self.send_json(
+            client.websocket,
+            send_message,
+        )
+
+    # ------------------------------------------------------------------
+    # Playback control
+    # ------------------------------------------------------------------
+
+    async def handle_play(
+        self,
+        client: ConnectedClient,
+        message: Dict[str, Any],
+    ) -> None:
+        if not await self.require_host(
+            client.client_id,
+            client.websocket,
+        ):
+            return
+
+        position = message.get("position")
+
+        start_at = message.get("startAt")
+
+        playback_rate = message.get(
+            "playbackRate",
+            1.0,
+        )
+
+        result = session_manager.play(
+            position=position,
+            start_at=start_at,
+        )
+
+        if isinstance(result, dict):
+            response = result
+        elif hasattr(result, "model_dump"):
+            response = result.model_dump()
+        else:
+            response = self._session_payload()
+
+        response.update(
+            {
+                "version": PROTOCOL_VERSION,
+                "type": MessageType.PLAY.value,
+                "serverTime": MasterClock.now_ms(),
+                "playbackRate": playback_rate,
+            }
+        )
+
+        await self.broadcast(
+            response,
+            role="receiver",
+        )
+
+    async def handle_pause(
+        self,
+        client: ConnectedClient,
+        message: Dict[str, Any],
+    ) -> None:
+        if not await self.require_host(
+            client.client_id,
+            client.websocket,
+        ):
+            return
+
+        position = message.get("position")
+
+        result = session_manager.pause(
+            position=position,
+        )
+
+        if isinstance(result, dict):
+            response = result
+        elif hasattr(result, "model_dump"):
+            response = result.model_dump()
+        else:
+            response = self._session_payload()
+
+        response.update(
+            {
+                "version": PROTOCOL_VERSION,
+                "type": MessageType.PAUSE.value,
+                "serverTime": MasterClock.now_ms(),
+            }
+        )
+
+        await self.broadcast(
+            response,
+            role="receiver",
+        )
+
+    async def handle_seek(
+        self,
+        client: ConnectedClient,
+        message: Dict[str, Any],
+    ) -> None:
+        if not await self.require_host(
+            client.client_id,
+            client.websocket,
+        ):
+            return
+
+        position = message.get(
+            "position",
+            message.get(
+                "currentTime",
+                0.0,
+            ),
+        )
+
+        try:
+            position = float(position)
+        except (TypeError, ValueError):
+            position = 0.0
+
+        result = session_manager.seek(position)
+
+        if isinstance(result, dict):
+            response = result
+        elif hasattr(result, "model_dump"):
+            response = result.model_dump()
+        else:
+            response = self._session_payload()
+
+        response.update(
+            {
+                "version": PROTOCOL_VERSION,
+                "type": MessageType.SEEK.value,
+                "position": position,
+                "serverTime": MasterClock.now_ms(),
+            }
+        )
+
+        await self.broadcast(
+            response,
+            role="receiver",
+        )
+
+    async def handle_set_rate(
+        self,
+        client: ConnectedClient,
+        message: Dict[str, Any],
+    ) -> None:
+        if not await self.require_host(
+            client.client_id,
+            client.websocket,
+        ):
+            return
+
+        playback_rate = message.get(
+            "playbackRate",
+            1.0,
+        )
+
+        try:
+            playback_rate = float(playback_rate)
+        except (TypeError, ValueError):
+            playback_rate = 1.0
+
+        playback_rate = max(
+            0.25,
+            min(
+                playback_rate,
+                4.0,
+            ),
+        )
+
+        result = session_manager.set_rate(
+            playback_rate,
+        )
+
+        if isinstance(result, dict):
+            response = result
+        elif hasattr(result, "model_dump"):
+            response = result.model_dump()
+        else:
+            response = self._session_payload()
+
+        response.update(
+            {
+                "version": PROTOCOL_VERSION,
+                "type": MessageType.SET_RATE.value,
+                "playbackRate": playback_rate,
+                "serverTime": MasterClock.now_ms(),
+            }
+        )
+
+        await self.broadcast(
+            response,
+            role="receiver",
+        )
+
+    async def handle_stop(
+        self,
+        client: ConnectedClient,
+        message: Dict[str, Any],
+    ) -> None:
+        if not await self.require_host(
+            client.client_id,
+            client.websocket,
+        ):
+            return
+
+        try:
+            result = session_manager.pause(
+                position=0.0,
+            )
+        except Exception:
+            result = self._session_payload()
+
+        if isinstance(result, dict):
+            response = result
+        elif hasattr(result, "model_dump"):
+            response = result.model_dump()
+        else:
+            response = self._session_payload()
+
+        response.update(
+            {
+                "version": PROTOCOL_VERSION,
+                "type": MessageType.STOP.value,
+                "position": 0.0,
+                "serverTime": MasterClock.now_ms(),
+            }
+        )
+
+        await self.broadcast(
+            response,
+            role="receiver",
+        )
+
+    # ------------------------------------------------------------------
+    # Load / unload
+    # ------------------------------------------------------------------
+
+    async def handle_load(
+        self,
+        client: ConnectedClient,
+        message: Dict[str, Any],
+    ) -> None:
+        if not await self.require_host(
+            client.client_id,
+            client.websocket,
+        ):
+            return
+
+        video_id = message.get("videoId")
+        video_name = message.get("videoName")
+        video_url = message.get("videoUrl")
+        duration = message.get("duration", 0.0)
+        file_size = message.get("fileSize", 0)
+        mime_type = message.get(
+            "mimeType",
+            "video/mp4",
+        )
+
+        result = session_manager.load_video(
+            video_id=video_id,
+            video_name=video_name,
+            video_url=video_url,
+            duration=duration,
+            file_size=file_size,
+            mime_type=mime_type,
+        )
+
+        if isinstance(result, dict):
+            response = result
+        elif hasattr(result, "model_dump"):
+            response = result.model_dump()
+        else:
+            response = self._session_payload()
+
+        response.update(
+            {
+                "version": PROTOCOL_VERSION,
+                "type": MessageType.LOAD.value,
+                "videoId": video_id,
+                "videoName": video_name,
+                "videoUrl": video_url,
+                "duration": duration,
+                "fileSize": file_size,
+                "mimeType": mime_type,
+                "serverTime": MasterClock.now_ms(),
+            }
+        )
+
+        await self.broadcast(
+            response,
+            role="receiver",
+        )
+
+    async def handle_unload(
+        self,
+        client: ConnectedClient,
+        message: Dict[str, Any],
+    ) -> None:
+        if not await self.require_host(
+            client.client_id,
+            client.websocket,
+        ):
+            return
+
+        result = session_manager.unload_video()
+
+        if isinstance(result, dict):
+            response = result
+        elif hasattr(result, "model_dump"):
+            response = result.model_dump()
+        else:
+            response = self._session_payload()
+
+        response.update(
+            {
+                "version": PROTOCOL_VERSION,
+                "type": MessageType.UNLOAD.value,
+                "serverTime": MasterClock.now_ms(),
+            }
+        )
+
+        await self.broadcast(
+            response,
+            role="receiver",
+        )
+
+    # ------------------------------------------------------------------
+    # Host sync
+    # ------------------------------------------------------------------
+
+    async def handle_sync(
+        self,
+        client: ConnectedClient,
+        message: Dict[str, Any],
+    ) -> None:
+        """
+        Accept a host timeline anchor.
+
+        This does NOT create an independent receiver timeline.
+        The server remains authoritative.
+        """
+
+        if not await self.require_host(
+            client.client_id,
+            client.websocket,
+        ):
+            return
+
+        current_time = message.get(
+            "currentTime",
+            message.get(
+                "position",
+                0.0,
+            ),
+        )
+
+        playing = bool(
+            message.get(
+                "playing",
+                False,
+            )
+        )
+
+        playback_rate = message.get(
+            "playbackRate",
+            1.0,
+        )
+
+        master_timestamp = message.get(
+            "masterTimestamp",
+        )
+
+        try:
+            current_time = float(current_time)
+        except (TypeError, ValueError):
+            current_time = 0.0
+
+        try:
+            playback_rate = float(playback_rate)
+        except (TypeError, ValueError):
+            playback_rate = 1.0
+
+        session_manager.update_from_host(
+            current_time=current_time,
+            playing=playing,
+            playback_rate=playback_rate,
+            master_timestamp=master_timestamp,
+        )
+
+        await self.broadcast_session_state()
+
+    # ------------------------------------------------------------------
+    # Telemetry
+    # ------------------------------------------------------------------
+
+    async def handle_telemetry(
+        self,
+        client: ConnectedClient,
+        message: Dict[str, Any],
+    ) -> None:
+        client.latency_ms = self._safe_float(
+            message.get("latencyMs"),
+            client.latency_ms,
+        )
+
+        client.clock_offset_ms = self._safe_float(
+            message.get("clockOffsetMs"),
+            client.clock_offset_ms,
+        )
+
+        client.drift_ms = self._safe_float(
+            message.get("driftMs"),
+            client.drift_ms,
+        )
+
+        client.calibration_offset_ms = self._safe_float(
+            message.get("calibrationOffsetMs"),
+            client.calibration_offset_ms,
+        )
+
+        playback_state = message.get(
+            "playbackState"
+        )
+
+        if playback_state is not None:
+            client.playback_state = str(
+                playback_state
+            )
+
+        telemetry_message = {
+            "version": PROTOCOL_VERSION,
+            "type": MessageType.TELEMETRY.value,
+            "client": self._client_to_dict(client),
+            "serverTime": MasterClock.now_ms(),
+        }
+
+        host = self.get_host()
+
+        if host is not None:
+            await self.send_json(
+                host.websocket,
+                telemetry_message,
+            )
+
+    # ------------------------------------------------------------------
+    # WebRTC signaling relay
+    # ------------------------------------------------------------------
+
+    async def relay_webrtc_message(
+        self,
+        client: ConnectedClient,
+        message: Dict[str, Any],
+    ) -> None:
+        """
+        Relay WebRTC signaling data directly through the LAN server.
+
+        Supported:
+
+            webrtc-offer
+            webrtc-answer
+            webrtc-candidate
+        """
+
+        message_type = message.get("type")
+
+        target_client_id = (
+            message.get("targetClientId")
+            or message.get("target")
+            or message.get("to")
+        )
+
+        if not target_client_id:
+            await self.send_json(
+                client.websocket,
+                {
+                    "version": PROTOCOL_VERSION,
+                    "type": MessageType.ERROR.value,
+                    "error": "WebRTC message is missing targetClientId.",
+                },
+            )
+            return
+
+        target = self.get_client(
+            target_client_id
+        )
+
+        if target is None:
+            await self.send_json(
+                client.websocket,
+                {
+                    "version": PROTOCOL_VERSION,
+                    "type": MessageType.ERROR.value,
+                    "error": (
+                        "WebRTC target client is not connected: "
+                        f"{target_client_id}"
+                    ),
+                },
+            )
+            return
+
+        forwarded = dict(message)
+
+        forwarded["version"] = PROTOCOL_VERSION
+
+        forwarded["fromClientId"] = (
+            client.client_id
+        )
+
+        forwarded["targetClientId"] = (
+            target_client_id
+        )
+
+        forwarded["serverTime"] = (
+            MasterClock.now_ms()
+        )
+
+        await self.send_json(
+            target.websocket,
+            forwarded,
+        )
+
+    # ------------------------------------------------------------------
+    # Generic message routing
+    # ------------------------------------------------------------------
+
+    async def handle_message(
+        self,
+        client: ConnectedClient,
+        message: Dict[str, Any],
+    ) -> None:
+        """
+        Route one incoming protocol message.
+        """
+
+        self.touch(client.client_id)
+
+        message_type = message.get("type")
+
+        if not message_type:
+            await self.send_json(
+                client.websocket,
+                {
+                    "version": PROTOCOL_VERSION,
+                    "type": MessageType.ERROR.value,
+                    "error": "Message type is missing.",
+                },
+            )
+            return
+
+        # --------------------------------------------------------------
+        # Heartbeat
+        # --------------------------------------------------------------
+
+        if message_type == MessageType.PING.value:
+            await self.send_json(
+                client.websocket,
+                {
+                    "version": PROTOCOL_VERSION,
+                    "type": MessageType.PONG.value,
+                    "serverTime": MasterClock.now_ms(),
+                },
+            )
+            return
+
+        if message_type == MessageType.PONG.value:
+            return
+
+        # --------------------------------------------------------------
+        # Clock synchronization
+        # --------------------------------------------------------------
+
+        if message_type == MessageType.CLOCK_PING.value:
+            await self.handle_clock_ping(
+                client,
+                message,
+            )
+            return
+
+        # --------------------------------------------------------------
+        # Host timeline synchronization
+        # --------------------------------------------------------------
+
+        if message_type == MessageType.SYNC.value:
+            await self.handle_sync(
+                client,
+                message,
+            )
+            return
+
+        # --------------------------------------------------------------
+        # Playback commands
+        # --------------------------------------------------------------
+
+        if message_type == MessageType.PLAY.value:
+            await self.handle_play(
+                client,
+                message,
+            )
+            return
+
+        if message_type == MessageType.PAUSE.value:
+            await self.handle_pause(
+                client,
+                message,
+            )
+            return
+
+        if message_type == MessageType.SEEK.value:
+            await self.handle_seek(
+                client,
+                message,
+            )
+            return
+
+        if message_type == MessageType.SET_RATE.value:
+            await self.handle_set_rate(
+                client,
+                message,
+            )
+            return
+
+        if message_type == MessageType.STOP.value:
+            await self.handle_stop(
+                client,
+                message,
+            )
+            return
+
+        # --------------------------------------------------------------
+        # Media commands
+        # --------------------------------------------------------------
+
+        if message_type == MessageType.LOAD.value:
+            await self.handle_load(
+                client,
+                message,
+            )
+            return
+
+        if message_type == MessageType.UNLOAD.value:
+            await self.handle_unload(
+                client,
+                message,
+            )
+            return
+
+        # --------------------------------------------------------------
+        # Telemetry
+        # --------------------------------------------------------------
+
+        if message_type == MessageType.TELEMETRY.value:
+            await self.handle_telemetry(
+                client,
+                message,
+            )
+            return
+
+        # --------------------------------------------------------------
+        # Calibration
+        # --------------------------------------------------------------
+
+        if message_type == MessageType.CALIBRATE.value:
+            if client.role == "receiver":
+                offset = self._safe_float(
+                    message.get("offsetMs"),
+                    0.0,
+                )
+
+                client.calibration_offset_ms = offset
+
+                await self.send_json(
+                    client.websocket,
+                    {
+                        "version": PROTOCOL_VERSION,
+                        "type": MessageType.CALIBRATE.value,
+                        "offsetMs": offset,
+                        "serverTime": MasterClock.now_ms(),
+                    },
+                )
+            return
+
+        # --------------------------------------------------------------
+        # WebRTC signaling
+        # --------------------------------------------------------------
+
+        if message_type in {
+            MessageType.WEBRTC_OFFER.value,
+            MessageType.WEBRTC_ANSWER.value,
+            MessageType.WEBRTC_CANDIDATE.value,
+        }:
+            await self.relay_webrtc_message(
+                client,
+                message,
+            )
+            return
+
+        # --------------------------------------------------------------
+        # Unknown message
+        # --------------------------------------------------------------
+
+        await self.send_json(
+            client.websocket,
+            {
+                "version": PROTOCOL_VERSION,
+                "type": MessageType.ERROR.value,
+                "error": (
+                    f"Unknown message type: {message_type}"
+                ),
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # WebSocket endpoint
+    # ------------------------------------------------------------------
+
+    async def websocket_endpoint(
+        self,
+        websocket: WebSocket,
+    ) -> None:
+        """
+        Main FastAPI WebSocket endpoint.
+        """
+
+        await websocket.accept()
+
+        client: Optional[ConnectedClient] = None
+
+        try:
+            await self.start()
+
+            # ----------------------------------------------------------
+            # Registration message
+            # ----------------------------------------------------------
+
+            raw_message = await websocket.receive_text()
+
+            try:
+                registration = json.loads(
+                    raw_message
+                )
+            except json.JSONDecodeError:
+                await self.send_json(
+                    websocket,
+                    {
                         "version": PROTOCOL_VERSION,
                         "type": MessageType.ERROR.value,
-                        "error": "Malformed JSON packet"
-                    })
-                    continue
+                        "error": "Invalid JSON registration message.",
+                    },
+                )
 
-                msg_type = raw_msg.get("type")
-                if not msg_type:
-                    continue
+                await websocket.close()
+                return
 
-                # 1. CLOCK PING (Highest priority for low latency NTP)
-                if msg_type == MessageType.CLOCK_PING.value:
-                    client_time = raw_msg.get("clientTime", 0)
-                    server_now = MasterClock.now_ms()
-                    await self._send_json(websocket, {
+            message_type = registration.get("type")
+
+            if message_type not in {
+                MessageType.JOIN.value,
+                MessageType.HOST.value,
+            }:
+                await self.send_json(
+                    websocket,
+                    {
                         "version": PROTOCOL_VERSION,
-                        "type": MessageType.CLOCK_PONG.value,
-                        "clientTime": client_time,
-                        "serverTime": server_now
-                    })
-                    if current_client_id and current_client_id in self.clients:
-                        self.clients[current_client_id][1].lastSeen = server_now
-                    continue
+                        "type": MessageType.ERROR.value,
+                        "error": (
+                            "First WebSocket message must be "
+                            "'host' or 'join'."
+                        ),
+                    },
+                )
 
-                # 2. HEARTBEAT PING
-                if msg_type == MessageType.PING.value:
-                    server_now = MasterClock.now_ms()
-                    await self._send_json(websocket, {
+                await websocket.close()
+                return
+
+            version = registration.get(
+                "version",
+                PROTOCOL_VERSION,
+            )
+
+            if version not in {
+                PROTOCOL_VERSION,
+                1,
+            }:
+                await self.send_json(
+                    websocket,
+                    {
                         "version": PROTOCOL_VERSION,
-                        "type": MessageType.PONG.value,
-                        "serverTime": server_now
-                    })
-                    if current_client_id and current_client_id in self.clients:
-                        self.clients[current_client_id][1].lastSeen = server_now
-                    continue
+                        "type": MessageType.ERROR.value,
+                        "error": (
+                            f"Unsupported protocol version: {version}"
+                        ),
+                    },
+                )
 
-                # 3. JOIN (Receiver or Client)
-                if msg_type == MessageType.JOIN.value:
-                    client_id = raw_msg.get("clientId") or f"phone-{uuid_short()}"
-                    current_client_id = client_id
-                    device_name = raw_msg.get("deviceName", "Phone")
-                    token = raw_msg.get("token")
-                    role = raw_msg.get("role", "receiver")
+                await websocket.close()
+                return
 
-                    # Verify token if configured
-                    if token and token != self.session_manager.state.roomToken:
-                        await self._send_json(websocket, {
+            client_id = str(
+                registration.get(
+                    "clientId",
+                    "",
+                )
+            ).strip()
+
+            if not client_id:
+                if message_type == MessageType.HOST.value:
+                    client_id = HOST_CLIENT_ID
+                else:
+                    client_id = (
+                        f"receiver-{int(time.time() * 1000)}"
+                    )
+
+            if message_type == MessageType.HOST.value:
+                role = "host"
+                device_name = registration.get(
+                    "deviceName",
+                    "Laptop Host",
+                )
+            else:
+                role = "receiver"
+                device_name = registration.get(
+                    "deviceName",
+                    "Unknown Device",
+                )
+
+            room_id = registration.get(
+                "roomId",
+                DEFAULT_ROOM_ID,
+            )
+
+            client_host = websocket.client
+
+            ip_address = None
+
+            if client_host is not None:
+                ip_address = getattr(
+                    client_host,
+                    "host",
+                    None,
+                )
+
+            # ----------------------------------------------------------
+            # Host uniqueness
+            # ----------------------------------------------------------
+
+            if role == "host":
+                existing_host = self.get_host()
+
+                if (
+                    existing_host is not None
+                    and existing_host.client_id != client_id
+                ):
+                    await self.send_json(
+                        websocket,
+                        {
                             "version": PROTOCOL_VERSION,
                             "type": MessageType.ERROR.value,
-                            "error": "Invalid room token. Access denied."
-                        })
-                        await websocket.close(code=4003)
-                        return
-
-                    state = ClientState(
-                        clientId=client_id,
-                        deviceName=device_name,
-                        role=role,
-                        connected=True,
-                        ipAddress=client_ip,
-                        lastSeen=MasterClock.now_ms()
+                            "error": (
+                                "Another host is already connected."
+                            ),
+                        },
                     )
-                    self.clients[client_id] = (websocket, state)
-                    logger.info(f"Client joined: {device_name} [{client_id}] from {client_ip}")
 
-                    # Reply with welcome and current session state
-                    session_info = self.session_manager.get_state().model_dump()
-                    await self._send_json(websocket, {
-                        "version": PROTOCOL_VERSION,
-                        "type": MessageType.WELCOME.value,
-                        "clientId": client_id,
-                        "serverTime": MasterClock.now_ms(),
-                        "session": session_info
-                    })
-                    # Also immediately send session-state packet for instant playback alignment
-                    await self._send_json(websocket, {
-                        "version": PROTOCOL_VERSION,
-                        "type": MessageType.SESSION_STATE.value,
-                        **session_info,
-                        "serverTime": MasterClock.now_ms()
-                    })
+                    await websocket.close()
+                    return
 
-                    # Notify host
-                    await self.broadcast_client_list()
-                    continue
+            # ----------------------------------------------------------
+            # Register client
+            # ----------------------------------------------------------
 
-                # 4. HOST REGISTRATION
-                if msg_type == MessageType.HOST.value:
-                    token = raw_msg.get("token")
-                    if token and token != self.session_manager.state.roomToken:
-                        await self._send_json(websocket, {
+            client = await self.register(
+                websocket=websocket,
+                client_id=client_id,
+                role=role,
+                device_name=device_name,
+                room_id=room_id,
+                ip_address=ip_address,
+            )
+
+            # ----------------------------------------------------------
+            # Welcome
+            # ----------------------------------------------------------
+
+            await self.send_welcome(
+                client
+            )
+
+            await self.broadcast_client_list()
+
+            # Send current state to receiver explicitly.
+            if client.role == "receiver":
+                await self.send_session_state(
+                    client.client_id
+                )
+
+            # ----------------------------------------------------------
+            # Main receive loop
+            # ----------------------------------------------------------
+
+            while True:
+                raw = await websocket.receive_text()
+
+                try:
+                    message = json.loads(raw)
+                except json.JSONDecodeError:
+                    await self.send_json(
+                        websocket,
+                        {
                             "version": PROTOCOL_VERSION,
                             "type": MessageType.ERROR.value,
-                            "error": "Invalid host room token"
-                        })
-                        await websocket.close(code=4003)
-                        return
-
-                    host_id = raw_msg.get("clientId", "host-master")
-                    current_client_id = host_id
-                    self.host_ws = websocket
-                    self.host_client_id = host_id
-
-                    state = ClientState(
-                        clientId=host_id,
-                        deviceName="Master Laptop (Host)",
-                        role="host",
-                        connected=True,
-                        ipAddress=client_ip,
-                        lastSeen=MasterClock.now_ms()
+                            "error": "Invalid JSON message.",
+                        },
                     )
-                    self.clients[host_id] = (websocket, state)
-                    logger.info(f"Master Host registered: [{host_id}] from {client_ip}")
-
-                    session_info = self.session_manager.get_state().model_dump()
-                    await self._send_json(websocket, {
-                        "version": PROTOCOL_VERSION,
-                        "type": MessageType.WELCOME.value,
-                        "clientId": host_id,
-                        "role": "host",
-                        "serverTime": MasterClock.now_ms(),
-                        "session": session_info,
-                        "clients": self.get_client_list_payload()
-                    })
                     continue
 
-                # Update sender's lastSeen timestamp
-                if current_client_id and current_client_id in self.clients:
-                    self.clients[current_client_id][1].lastSeen = MasterClock.now_ms()
-
-                # 4.5. LIVE SYNC FROM MASTER HOST
-                if msg_type == MessageType.SYNC.value:
-                    if current_client_id == self.host_client_id or (current_client_id in self.clients and self.clients[current_client_id][1].role == "host"):
-                        c_time = float(raw_msg.get("currentTime", 0.0))
-                        is_playing = bool(raw_msg.get("playing", False))
-                        p_rate = float(raw_msg.get("playbackRate", 1.0))
-                        m_ts = raw_msg.get("masterTimestamp")
-                        if m_ts is not None:
-                            try:
-                                m_ts = float(m_ts)
-                            except (ValueError, TypeError):
-                                m_ts = None
-                        self.session_manager.update_from_host(c_time, is_playing, p_rate, master_timestamp=m_ts)
-                        payload = self.session_manager.get_sync_payload()
-                        await self.broadcast_to_receivers(payload)
-                    continue
-
-                # 4.6. REMOTE CALIBRATION (from Host to Phone or vice-versa)
-                if msg_type == "calibrate":
-                    target_id = raw_msg.get("targetId")
-                    offset_ms = raw_msg.get("offsetMs", 0)
-                    if target_id and target_id in self.clients:
-                        target_ws, _ = self.clients[target_id]
-                        await self._send_json(target_ws, {
-                            "version": PROTOCOL_VERSION,
-                            "type": "calibrate",
-                            "offsetMs": offset_ms
-                        })
-                    continue
-
-                # 5. PLAY COMMAND (from Host)
-                if msg_type == MessageType.PLAY.value:
-                    pos = raw_msg.get("position")
-                    start_at = raw_msg.get("startAt")
-                    # If startAt was not provided, schedule it 150ms into the future for packet travel
-                    if not start_at:
-                        start_at = MasterClock.now_ms() + 150.0
-
-                    new_state = self.session_manager.play(position=pos, start_at=start_at)
-                    payload = {
-                        "version": PROTOCOL_VERSION,
-                        "type": MessageType.PLAY.value,
-                        "position": pos if pos is not None else new_state.currentTime,
-                        "startAt": start_at,
-                        "playbackRate": new_state.playbackRate,
-                        "sequence": new_state.sequence,
-                        "serverTime": MasterClock.now_ms()
-                    }
-                    await self.broadcast_to_receivers(payload)
-                    continue
-
-                # 6. PAUSE COMMAND (from Host)
-                if msg_type == MessageType.PAUSE.value:
-                    pos = raw_msg.get("position")
-                    new_state = self.session_manager.pause(position=pos)
-                    payload = {
-                        "version": PROTOCOL_VERSION,
-                        "type": MessageType.PAUSE.value,
-                        "position": new_state.currentTime,
-                        "sequence": new_state.sequence,
-                        "serverTime": MasterClock.now_ms()
-                    }
-                    await self.broadcast_to_receivers(payload)
-                    continue
-
-                # 7. SEEK COMMAND (from Host)
-                if msg_type == MessageType.SEEK.value:
-                    pos = float(raw_msg.get("position", 0.0))
-                    new_state = self.session_manager.seek(pos)
-                    payload = {
-                        "version": PROTOCOL_VERSION,
-                        "type": MessageType.SEEK.value,
-                        "position": new_state.currentTime,
-                        "playing": new_state.playing,
-                        "sequence": new_state.sequence,
-                        "serverTime": MasterClock.now_ms()
-                    }
-                    await self.broadcast_to_receivers(payload)
-                    continue
-
-                # 8. SET RATE COMMAND (from Host)
-                if msg_type == MessageType.SET_RATE.value:
-                    rate = float(raw_msg.get("playbackRate", 1.0))
-                    new_state = self.session_manager.set_rate(rate)
-                    payload = {
-                        "version": PROTOCOL_VERSION,
-                        "type": MessageType.SET_RATE.value,
-                        "playbackRate": new_state.playbackRate,
-                        "currentTime": new_state.currentTime,
-                        "sequence": new_state.sequence,
-                        "serverTime": MasterClock.now_ms()
-                    }
-                    await self.broadcast_to_receivers(payload)
-                    continue
-
-                # 9. LOAD VIDEO COMMAND (from Host)
-                if msg_type == MessageType.LOAD.value:
-                    v_id = raw_msg.get("videoId")
-                    v_name = raw_msg.get("videoName", "Movie")
-                    v_url = raw_msg.get("videoUrl", f"/media/{v_id}")
-                    dur = float(raw_msg.get("duration", 0.0))
-                    size = int(raw_msg.get("fileSize", 0))
-                    mime = raw_msg.get("mimeType", "video/mp4")
-                    new_state = self.session_manager.load_video(v_id, v_name, v_url, dur, size, mime)
-                    payload = {
-                        "version": PROTOCOL_VERSION,
-                        "type": MessageType.LOAD.value,
-                        "videoId": v_id,
-                        "videoName": v_name,
-                        "videoUrl": v_url,
-                        "duration": dur,
-                        "fileSize": size,
-                        "mimeType": mime,
-                        "sequence": new_state.sequence,
-                        "serverTime": MasterClock.now_ms()
-                    }
-                    await self.broadcast_to_receivers(payload)
-                    continue
-
-                # 10. UNLOAD VIDEO COMMAND
-                if msg_type == MessageType.UNLOAD.value:
-                    new_state = self.session_manager.unload_video()
-                    payload = {
-                        "version": PROTOCOL_VERSION,
-                        "type": MessageType.UNLOAD.value,
-                        "sequence": new_state.sequence,
-                        "serverTime": MasterClock.now_ms()
-                    }
-                    await self.broadcast_to_receivers(payload)
-                    continue
-
-                # 11. TELEMETRY REPORT (from Receiver)
-                if msg_type == MessageType.TELEMETRY.value:
-                    client_id = raw_msg.get("clientId")
-                    if client_id and client_id in self.clients:
-                        _, client_state = self.clients[client_id]
-                        client_state.latencyMs = round(float(raw_msg.get("latencyMs", 0.0)), 1)
-                        client_state.clockOffsetMs = round(float(raw_msg.get("clockOffsetMs", 0.0)), 1)
-                        client_state.driftMs = round(float(raw_msg.get("driftMs", 0.0)), 1)
-                        client_state.calibrationOffsetMs = round(float(raw_msg.get("calibrationOffsetMs", 0.0)), 1)
-                        client_state.playbackState = raw_msg.get("playbackState", "playing")
-                        client_state.deviceName = raw_msg.get("deviceName", client_state.deviceName)
-                        client_state.lastSeen = MasterClock.now_ms()
-
-                        # Forward live telemetry to host
-                        telemetry_update = {
-                            "version": PROTOCOL_VERSION,
-                            "type": MessageType.TELEMETRY.value,
-                            "client": client_state.model_dump(),
-                            "serverTime": MasterClock.now_ms()
-                        }
-                        await self.send_to_host(telemetry_update)
-                    continue
-
-                # 12. OPTIONAL OFFLINE WEBRTC SIGNALING (Offer, Answer, Candidate)
-                if msg_type in (MessageType.WEBRTC_OFFER.value, MessageType.WEBRTC_ANSWER.value, MessageType.WEBRTC_CANDIDATE.value):
-                    target_id = raw_msg.get("targetId")
-                    if target_id and target_id in self.clients:
-                        target_ws, _ = self.clients[target_id]
-                        await self._send_json(target_ws, {
-                            **raw_msg,
-                            "senderId": current_client_id
-                        })
-                    elif not target_id and self.host_ws and current_client_id != self.host_client_id:
-                        # Forward to host by default if target not specified
-                        await self.send_to_host({
-                            **raw_msg,
-                            "senderId": current_client_id
-                        })
-                    continue
+                await self.handle_message(
+                    client,
+                    message,
+                )
 
         except WebSocketDisconnect:
-            pass
-        except Exception as e:
-            logger.warning(f"WebSocket error for client {current_client_id}: {e}")
+            logger.info(
+                "WebSocket disconnected: %s",
+                client.client_id if client else "unknown",
+            )
+
+        except Exception:
+            logger.exception(
+                "Unexpected WebSocket error: %s",
+                client.client_id if client else "unknown",
+            )
+
         finally:
-            if current_client_id:
-                await self.disconnect_client(current_client_id)
+            if client is not None:
+                await self.unregister(
+                    client.client_id,
+                    websocket,
+                )
+
+    # ------------------------------------------------------------------
+    # Background synchronization
+    # ------------------------------------------------------------------
+
+    async def _periodic_session_broadcast(self) -> None:
+        """
+        Periodically broadcast authoritative session state.
+
+        Receivers also receive immediate updates for playback commands.
+        This periodic broadcast protects against packet/message loss.
+        """
+
+        interval = 0.4
+
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+
+                if self.get_receiver_clients():
+                    await self.broadcast_session_state()
+
+            except asyncio.CancelledError:
+                raise
+
+            except Exception:
+                logger.exception(
+                    "Periodic session broadcast failed"
+                )
+
+    async def _periodic_heartbeat(self) -> None:
+        """
+        Remove stale clients and keep active WebSockets alive.
+        """
+
+        interval = HEARTBEAT_INTERVAL_MS / 1000.0
+
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+
+                now = MasterClock.now_ms()
+
+                stale_clients = []
+
+                for client in list(
+                    self.clients.values()
+                ):
+                    age = now - client.last_seen
+
+                    if age > CLIENT_TIMEOUT_MS:
+                        stale_clients.append(
+                            client.client_id
+                        )
+                        continue
+
+                    await self.send_json(
+                        client.websocket,
+                        {
+                            "version": PROTOCOL_VERSION,
+                            "type": MessageType.PING.value,
+                            "serverTime": now,
+                        },
+                    )
+
+                for client_id in stale_clients:
+                    client = self.get_client(
+                        client_id
+                    )
+
+                    if client is not None:
+                        try:
+                            await client.websocket.close()
+                        except Exception:
+                            pass
+
+                    await self.unregister(
+                        client_id
+                    )
+
+            except asyncio.CancelledError:
+                raise
+
+            except Exception:
+                logger.exception(
+                    "Heartbeat loop failed"
+                )
+
+    # ------------------------------------------------------------------
+    # Utility
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _safe_float(
+        value: Any,
+        default: float = 0.0,
+    ) -> float:
+        try:
+            return float(value)
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return default
 
 
-def uuid_short() -> str:
-    import uuid
-    return uuid.uuid4().hex[:6]
+# ----------------------------------------------------------------------
+# Global manager
+# ----------------------------------------------------------------------
+
+connection_manager = ConnectionManager()
+
+# Backward-compatible aliases.
+manager = connection_manager
+websocket_manager = connection_manager
+WebSocketManager = ConnectionManager
+
+
+async def websocket_endpoint(
+    websocket: WebSocket,
+) -> None:
+    """
+    FastAPI-compatible WebSocket endpoint.
+
+    backend/server/app.py can simply use:
+
+        @app.websocket("/ws")
+        async def websocket_route(websocket: WebSocket):
+            await websocket_endpoint(websocket)
+    """
+
+    await connection_manager.websocket_endpoint(
+        websocket
+    )
+
+
+__all__ = [
+    "ConnectedClient",
+    "ConnectionManager",
+    "connection_manager",
+    "manager",
+    "websocket_manager",
+    "websocket_endpoint",
+]
+# Backward compatibility
+WebSocketManager = ConnectionManager

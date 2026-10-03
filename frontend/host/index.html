@@ -1,257 +1,777 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BeatSync-Pro — Master Laptop Cinema Host</title>
-  <link rel="stylesheet" href="/shared/css/theme.css">
-  <link rel="stylesheet" href="/static/host/host.css">
-</head>
-<body>
-  <div class="host-container">
-    <!-- Header -->
-    <header class="host-header glass-panel">
-      <div class="brand-section">
-        <div class="brand-icon">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polygon points="5 3 19 12 5 21 5 3" fill="currentColor"></polygon>
-          </svg>
-        </div>
-        <div>
-          <h1 class="brand-title">BeatSync-Pro</h1>
-          <p style="font-size: 0.8rem; color: var(--text-muted);">Authoritative Master Video & Audio Timeline Sync</p>
-        </div>
-      </div>
+    <meta charset="UTF-8">
 
-      <div class="header-badges">
-        <span class="badge badge-offline badge-pulse" id="networkModeBadge">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
-            <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
-            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
-            <line x1="12" y1="20" x2="12.01" y2="20"></line>
-          </svg>
-          LOCAL LAN ONLY (No Internet)
-        </span>
-        <span class="badge badge-sync" id="roomTokenBadge">
-          Room: <strong id="roomTokenDisplay">...</strong>
-        </span>
-        <span class="badge badge-sync" id="clientCountBadge">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
-            <line x1="12" y1="18" x2="12.01" y2="18"></line>
-          </svg>
-          <span id="activeClientsCount">0</span> Phones Connected
-        </span>
-      </div>
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>BeatSync-Pro — Host</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family:
+                Inter,
+                system-ui,
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                sans-serif;
+
+            background:
+                radial-gradient(
+                    circle at top,
+                    #182033 0%,
+                    #0b0f17 45%,
+                    #05070b 100%
+                );
+
+            color: #ffffff;
+        }
+
+        .app {
+            width: 100%;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .brand h1 {
+            margin: 0;
+            font-size: 28px;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+        }
+
+        .brand p {
+            margin: 5px 0 0;
+            color: #9ca3af;
+            font-size: 14px;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 9px 14px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.07);
+            color: #d1d5db;
+            font-size: 13px;
+        }
+
+        .status-dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            background: #6b7280;
+        }
+
+        .main-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 330px;
+            gap: 20px;
+        }
+
+        .card {
+            background: rgba(17, 24, 39, 0.86);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 18px;
+            overflow: hidden;
+            box-shadow:
+                0 20px 60px rgba(0, 0, 0, 0.28);
+        }
+
+        .video-wrapper {
+            position: relative;
+            width: 100%;
+            background: #000;
+            aspect-ratio: 16 / 9;
+        }
+
+        #masterVideo {
+            display: block;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: #000;
+        }
+
+        .video-empty {
+            position: absolute;
+            inset: 0;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            text-align: center;
+            color: #9ca3af;
+            pointer-events: none;
+        }
+
+        .video-empty-content {
+            max-width: 420px;
+            padding: 30px;
+        }
+
+        .video-empty-title {
+            font-size: 22px;
+            font-weight: 700;
+            color: #e5e7eb;
+            margin-bottom: 8px;
+        }
+
+        .video-empty-text {
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        .controls {
+            padding: 18px;
+        }
+
+        .control-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+
+        button {
+            border: 0;
+            border-radius: 10px;
+            padding: 10px 15px;
+
+            background: #1f2937;
+            color: #ffffff;
+
+            font-size: 14px;
+            font-weight: 600;
+
+            cursor: pointer;
+
+            transition:
+                transform 0.15s ease,
+                background 0.15s ease;
+        }
+
+        button:hover {
+            background: #374151;
+            transform: translateY(-1px);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button.primary {
+            background: #2563eb;
+        }
+
+        button.primary:hover {
+            background: #1d4ed8;
+        }
+
+        button.danger {
+            background: #991b1b;
+        }
+
+        button.danger:hover {
+            background: #b91c1c;
+        }
+
+        input[type="text"] {
+            min-width: 220px;
+            flex: 1;
+
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+
+            padding: 10px 12px;
+
+            background: #0f172a;
+            color: #ffffff;
+
+            outline: none;
+        }
+
+        input[type="text"]:focus {
+            border-color: #3b82f6;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .file-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+
+            padding: 10px 15px;
+            border-radius: 10px;
+
+            background: #1f2937;
+            color: #ffffff;
+
+            font-size: 14px;
+            font-weight: 600;
+
+            cursor: pointer;
+        }
+
+        .file-button:hover {
+            background: #374151;
+        }
+
+        .info-row {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-top: 14px;
+        }
+
+        .info-box {
+            padding: 12px;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.045);
+        }
+
+        .info-label {
+            color: #9ca3af;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+        }
+
+        .info-value {
+            margin-top: 5px;
+            color: #f3f4f6;
+            font-size: 14px;
+            font-weight: 700;
+            word-break: break-word;
+        }
+
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .panel {
+            padding: 18px;
+        }
+
+        .panel-title {
+            margin: 0 0 14px;
+            font-size: 16px;
+            font-weight: 750;
+        }
+
+        .room-box {
+            padding: 14px;
+            border-radius: 12px;
+            background: rgba(37, 99, 235, 0.12);
+            border: 1px solid rgba(59, 130, 246, 0.2);
+        }
+
+        .room-label {
+            color: #93c5fd;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+        }
+
+        .room-value {
+            margin-top: 5px;
+            font-size: 20px;
+            font-weight: 800;
+            letter-spacing: 1px;
+        }
+
+        .client-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .client-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+
+            padding: 11px 12px;
+
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.045);
+        }
+
+        .client-name {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .client-state {
+            flex-shrink: 0;
+
+            font-size: 11px;
+            color: #9ca3af;
+        }
+
+        .empty-clients {
+            color: #6b7280;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .diagnostics {
+            padding: 12px;
+            border-radius: 12px;
+            background: #080b12;
+            color: #9ca3af;
+
+            font-family:
+                Consolas,
+                "Courier New",
+                monospace;
+
+            font-size: 11px;
+            line-height: 1.55;
+
+            max-height: 220px;
+            overflow-y: auto;
+
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .hint {
+            margin-top: 12px;
+            color: #6b7280;
+            font-size: 12px;
+            line-height: 1.55;
+        }
+
+        @media (max-width: 950px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .sidebar {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 650px) {
+            .app {
+                padding: 12px;
+            }
+
+            .header {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .sidebar {
+                display: flex;
+            }
+
+            .info-row {
+                grid-template-columns: 1fr;
+            }
+
+            .control-row {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            input[type="text"] {
+                min-width: 0;
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="app">
+
+    <header class="header">
+
+        <div class="brand">
+            <h1>BeatSync-Pro</h1>
+            <p>Offline LAN Cinema Audio Sync</p>
+        </div>
+
+        <div class="status" id="connectionStatus">
+            <span
+                class="status-dot"
+                id="connectionStatusDot"
+            ></span>
+
+            <span id="connectionStatusText">
+                Connecting...
+            </span>
+        </div>
+
     </header>
 
-    <!-- Main Grid -->
-    <main class="dashboard-grid">
-      <!-- Left Column: Master Video & Controls -->
-      <section class="video-stage-panel glass-panel">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <h2 style="font-size: 1.125rem; font-weight: 600;" id="movieTitleDisplay">No Movie Loaded</h2>
-          <span id="codecStatusBadge" class="badge badge-offline" style="display: none;">H.264 / AAC Direct Play</span>
-        </div>
 
-        <!-- Video Player Wrapper -->
-        <div class="video-wrapper" id="videoWrapper">
-          <video id="masterVideo" playsinline preload="auto">
-            Your browser does not support the video tag.
-          </video>
-          <div class="video-empty-state" id="emptyVideoState">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect>
-              <line x1="7" y1="2" x2="7" y2="22"></line>
-              <line x1="17" y1="2" x2="17" y2="22"></line>
-              <line x1="2" y1="12" x2="22" y2="12"></line>
-              <line x1="2" y1="7" x2="7" y2="7"></line>
-              <line x1="2" y1="17" x2="7" y2="17"></line>
-              <line x1="17" y1="17" x2="22" y2="17"></line>
-              <line x1="17" y1="7" x2="22" y2="7"></line>
-            </svg>
-            <p style="font-size: 0.95rem; font-weight: 500;">Select a movie or click Load Sample Demo below</p>
-          </div>
-        </div>
+    <main class="main-grid">
 
-        <!-- Master Playback Controls -->
-        <div class="master-controls-bar">
-          <!-- Timeline Scrubber -->
-          <div class="timeline-row">
-            <span class="time-display" id="currentTimeDisplay">00:00:00</span>
-            <input type="range" class="scrubber-slider" id="scrubberSlider" min="0" max="100" step="0.1" value="0">
-            <span class="time-display" id="durationDisplay">00:00:00</span>
-          </div>
+        <!-- =========================
+             MAIN VIDEO AREA
+        ========================== -->
 
-          <!-- Buttons Row -->
-          <div class="buttons-row">
-            <div class="button-group-left">
-              <!-- Play / Pause -->
-              <button class="btn btn-primary" id="playPauseBtn" title="Play / Pause (Space)">
-                <svg id="playIcon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                  <polygon points="5 3 19 12 5 21 5 3"></polygon>
-                </svg>
-                <svg id="pauseIcon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="display: none;">
-                  <rect x="6" y="4" width="4" height="16"></rect>
-                  <rect x="14" y="4" width="4" height="16"></rect>
-                </svg>
-                <span id="playPauseText">Play</span>
-              </button>
+        <section class="card">
 
-              <!-- Stop / Restart -->
-              <button class="btn btn-secondary" id="restartBtn" title="Restart from beginning">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <polyline points="1 4 1 10 7 10"></polyline>
-                  <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
-                </svg>
-                Restart
-              </button>
+            <div class="video-wrapper">
 
-              <!-- Step backward / forward 10s -->
-              <button class="btn btn-secondary" id="stepBackBtn" title="Back 10s">
-                -10s
-              </button>
-              <button class="btn btn-secondary" id="stepForwardBtn" title="Forward 10s">
-                +10s
-              </button>
+                <video
+                    id="masterVideo"
+                    playsinline
+                    preload="auto"
+                    controls
+                ></video>
+
+                <div
+                    class="video-empty"
+                    id="videoEmptyState"
+                >
+                    <div class="video-empty-content">
+
+                        <div class="video-empty-title">
+                            Select a movie
+                        </div>
+
+                        <div class="video-empty-text">
+                            Open a local video file on this laptop.
+                            Its audio will later be captured and
+                            streamed to connected phones over the
+                            local network.
+                        </div>
+
+                    </div>
+                </div>
+
             </div>
 
-            <div class="button-group-right">
-              <!-- Volume & Mute -->
-              <div class="volume-container">
-                <button class="btn btn-secondary btn-icon" id="muteToggleBtn" title="Mute / Unmute">
-                  <svg id="volIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
-                  </svg>
-                </button>
-                <input type="range" class="volume-slider" id="volumeSlider" min="0" max="1" step="0.05" value="1">
-              </div>
 
-              <!-- Speed Selector -->
-              <select class="rate-select" id="rateSelect" title="Playback Speed">
-                <option value="0.5">0.5×</option>
-                <option value="0.75">0.75×</option>
-                <option value="1.0" selected>1.0×</option>
-                <option value="1.25">1.25×</option>
-                <option value="1.5">1.5×</option>
-                <option value="2.0">2.0×</option>
-              </select>
+            <div class="controls">
 
-              <!-- Fullscreen -->
-              <button class="btn btn-secondary btn-icon" id="fullscreenBtn" title="Toggle Fullscreen">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
-                </svg>
-              </button>
+                <div class="control-row">
+
+                    <label
+                        class="file-button"
+                        for="localFileInput"
+                    >
+                        Open Local Video
+                    </label>
+
+                    <input
+                        id="localFileInput"
+                        type="file"
+                        accept="video/*,.mp4,.webm,.ogg,.mov,.m4v,.mkv"
+                    >
+
+                    <button
+                        id="playBtn"
+                        class="primary"
+                        type="button"
+                    >
+                        Play
+                    </button>
+
+                    <button
+                        id="pauseBtn"
+                        type="button"
+                    >
+                        Pause
+                    </button>
+
+                    <button
+                        id="stopBtn"
+                        class="danger"
+                        type="button"
+                    >
+                        Stop
+                    </button>
+
+                    <button
+                        id="restartBtn"
+                        type="button"
+                    >
+                        Restart
+                    </button>
+
+                </div>
+
+
+                <div
+                    class="control-row"
+                    style="margin-top: 10px;"
+                >
+
+                    <input
+                        id="filePathInput"
+                        type="text"
+                        placeholder="Local file path..."
+                    >
+
+                    <button
+                        id="loadFromPathBtn"
+                        type="button"
+                    >
+                        Load Path
+                    </button>
+
+                    <button
+                        id="sampleVideoBtn"
+                        type="button"
+                    >
+                        Sample Video
+                    </button>
+
+                </div>
+
+
+                <div class="info-row">
+
+                    <div class="info-box">
+
+                        <div class="info-label">
+                            Movie
+                        </div>
+
+                        <div
+                            class="info-value"
+                            id="videoName"
+                        >
+                            No video
+                        </div>
+
+                    </div>
+
+
+                    <div class="info-box">
+
+                        <div class="info-label">
+                            Position
+                        </div>
+
+                        <div
+                            class="info-value"
+                            id="videoPosition"
+                        >
+                            00:00
+                        </div>
+
+                    </div>
+
+
+                    <div class="info-box">
+
+                        <div class="info-label">
+                            Duration
+                        </div>
+
+                        <div
+                            class="info-value"
+                            id="videoDuration"
+                        >
+                            00:00
+                        </div>
+
+                    </div>
+
+                </div>
+
+
+                <div class="hint">
+                    Recommended format:
+                    H.264 video + AAC audio in MP4.
+                    The movie stays on the host laptop.
+                    Connected phones are intended to receive
+                    the synchronized audio over the LAN.
+                </div>
+
             </div>
-          </div>
-        </div>
 
-        <!-- Video Selection Card -->
-        <div class="video-loader-card">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <strong style="font-size: 0.875rem;">Load Movie on Laptop</strong>
-            <span style="font-size: 0.75rem; color: var(--text-faint);">Local file stays on laptop; phones stream via LAN</span>
-          </div>
+        </section>
 
-          <div class="loader-inputs-grid">
-            <!-- Browse File Input -->
-            <input type="file" id="localFileInput" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/x-matroska,.mkv" style="display: none;">
-            <button class="btn btn-secondary" id="browseFileBtn">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-              </svg>
-              Select Movie File (.mp4, .webm, .mkv)
-            </button>
 
-            <!-- Direct Path Input -->
-            <input type="text" class="path-input" id="filePathInput" placeholder="Or enter exact path: e.g. D:\Movies\Avatar.mp4">
-            <button class="btn btn-secondary" id="loadFromPathBtn">Load Path</button>
+        <!-- =========================
+             SIDEBAR
+        ========================== -->
 
-            <!-- Load Sample Video Button -->
-            <button class="btn btn-primary" id="loadSampleBtn" style="background: linear-gradient(135deg, var(--accent-cyan), #0284c7);">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polygon points="5 3 19 12 5 21 5 3" fill="currentColor"></polygon>
-              </svg>
-              Load Sample Demo Video
-            </button>
-          </div>
+        <aside class="sidebar">
 
-          <!-- Compatibility Warning Box -->
-          <div id="codecAlertBox" class="glass-panel" style="display: none; padding: 10px 14px; background: rgba(245, 158, 11, 0.1); border-color: rgba(245, 158, 11, 0.3); font-size: 0.8rem; color: var(--accent-amber);">
-            <strong>Notice:</strong> This browser may not natively decode this video codec. Recommended: MP4 container with H.264 video and AAC audio for 100% universal mobile playback.
-          </div>
-        </div>
-      </section>
+            <!-- ROOM -->
 
-      <!-- Right Column: LAN Info, QR Code, and Devices -->
-      <aside class="side-column">
-        <!-- LAN Connect Card -->
-        <div class="lan-connect-card glass-panel">
-          <div class="lan-header-title">
-            <span>Connect Phones</span>
-            <span class="badge badge-offline">Offline LAN</span>
-          </div>
+            <section class="card panel">
 
-          <p style="font-size: 0.8125rem; color: var(--text-muted);">
-            Ensure phones are on the <strong>same Wi-Fi or hotspot</strong> as this laptop. Scan QR code or open URL:
-          </p>
+                <h2 class="panel-title">
+                    Cinema Room
+                </h2>
 
-          <!-- QR Code Image -->
-          <div class="qr-box">
-            <img id="qrCodeImg" src="/api/qr" alt="Connection QR Code">
-          </div>
+                <div class="room-box">
 
-          <!-- URL with copy button -->
-          <div class="url-copy-box">
-            <span class="url-copy-text" id="phoneUrlText">Loading...</span>
-            <button class="btn btn-secondary" id="copyUrlBtn" style="padding: 4px 8px; font-size: 0.75rem;">
-              Copy
-            </button>
-          </div>
+                    <div class="room-label">
+                        Room ID
+                    </div>
 
-          <!-- Network Adapter Selector if multiple -->
-          <div id="adapterSelectorRow" style="display: none; flex-direction: column; gap: 6px;">
-            <label style="font-size: 0.75rem; color: var(--text-faint);">Network Adapter:</label>
-            <select class="rate-select" id="adapterSelect" style="width: 100%;"></select>
-          </div>
-        </div>
+                    <div
+                        class="room-value"
+                        id="roomId"
+                    >
+                        movie-night
+                    </div>
 
-        <!-- Connected Devices List -->
-        <div class="devices-card glass-panel">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <strong style="font-size: 0.95rem;">Connected Phone Speakers (Sound Sync)</strong>
-            <span style="font-size: 0.75rem; color: var(--text-muted);">
-              Avg Drift: <span id="avgDriftText" style="color: var(--accent-emerald); font-weight: 700;">0ms</span>
-            </span>
-          </div>
+                </div>
 
-          <div id="devicesListContainer" style="display: flex; flex-direction: column; gap: 10px;">
-            <p style="font-size: 0.8125rem; color: var(--text-faint); text-align: center; padding: 16px;">
-              No phones connected yet.<br>Scan the QR code with phone camera to connect wireless sound!
-            </p>
-          </div>
-        </div>
+                <div
+                    class="hint"
+                    style="margin-top: 12px;"
+                >
+                    Connect phones to this BeatSync-Pro
+                    room using the receiver page.
+                </div>
 
-        <!-- Event Log -->
-        <div class="event-log-card glass-panel">
-          <strong style="font-size: 0.85rem; color: var(--text-muted);">Sync Event Log</strong>
-          <div class="log-scroll-area" id="logScrollArea">
-            <div class="log-entry">
-              <span class="log-time">[Startup]</span>
-              <span>BeatSync-Pro Host initialized. Ready for phones.</span>
-            </div>
-          </div>
-        </div>
-      </aside>
+            </section>
+
+
+            <!-- CONNECTED DEVICES -->
+
+            <section class="card panel">
+
+                <h2 class="panel-title">
+                    Connected Phones
+                </h2>
+
+                <div
+                    class="client-list"
+                    id="clientList"
+                >
+                    <div class="empty-clients">
+                        No receiver devices connected.
+                    </div>
+                </div>
+
+            </section>
+
+
+            <!-- WEBRTC -->
+
+            <section class="card panel">
+
+                <h2 class="panel-title">
+                    LAN Audio
+                </h2>
+
+                <div class="info-box">
+
+                    <div class="info-label">
+                        WebRTC
+                    </div>
+
+                    <div
+                        class="info-value"
+                        id="webrtcStatus"
+                    >
+                        Waiting for video
+                    </div>
+
+                </div>
+
+                <div
+                    class="hint"
+                    id="webrtcHint"
+                >
+                    The movie audio capture and direct LAN
+                    WebRTC connection will be initialized after
+                    the host loads a playable video.
+                </div>
+
+            </section>
+
+
+            <!-- DIAGNOSTICS -->
+
+            <section class="card panel">
+
+                <h2 class="panel-title">
+                    Diagnostics
+                </h2>
+
+                <div
+                    class="diagnostics"
+                    id="diagnostics"
+                >
+                    BeatSync-Pro Host
+                    Protocol: v2
+                    WebRTC: Offline LAN
+                    Signaling: WebSocket
+                    Clock: Authoritative
+                    Sync: Enabled
+                </div>
+
+            </section>
+
+        </aside>
+
     </main>
-  </div>
 
-  <!-- Shared Sync Scripts -->
-  <script src="/shared/js/clock-sync.js"></script>
-  <script src="/shared/js/drift-controller.js"></script>
-  <script src="/static/host/host.js"></script>
+</div>
+
+
+<!-- =========================================================
+     BeatSync shared modules
+========================================================= -->
+
+<script src="/shared/js/clock-sync.js"></script>
+
+<script src="/shared/js/drift-controller.js"></script>
+
+<!--
+    IMPORTANT:
+    WebRTC manager MUST load before host.js.
+    host.js will use OfflineWebRTCManager.
+-->
+<script src="/shared/js/webrtc-fallback.js"></script>
+
+
+<!-- =========================================================
+     Host application
+========================================================= -->
+
+<script src="/static/host/host.js"></script>
+
 </body>
 </html>

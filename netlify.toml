@@ -1,0 +1,54 @@
+# Netlify Configuration for BeatSync-Pro Offline Cinema Portal
+
+[build]
+  publish = "frontend"
+
+[[redirects]]
+  from = "/static/host/*"
+  to = "/host/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/static/receiver/*"
+  to = "/receiver/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/host/*"
+  to = "/host/index.html"
+  status = 200
+
+[[redirects]]
+  from = "/host"
+  to = "/host/index.html"
+  status = 200
+
+[[redirects]]
+  from = "/player/*"
+  to = "/receiver/index.html"
+  status = 200
+
+[[redirects]]
+  from = "/player"
+  to = "/receiver/index.html"
+  status = 200
+
+[[redirects]]
+  from = "/receiver/*"
+  to = "/receiver/index.html"
+  status = 200
+
+[[redirects]]
+  from = "/receiver"
+  to = "/receiver/index.html"
+  status = 200
+
+[[redirects]]
+  from = "/portal"
+  to = "/portal.html"
+  status = 200
+
+[[redirects]]
+  from = "/"
+  to = "/index.html"
+  status = 200

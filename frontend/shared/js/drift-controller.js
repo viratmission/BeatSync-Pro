@@ -1,7 +1,20 @@
-/**
- * BeatSync-Pro High-Precision Audio & Timeline Drift Controller
- * Continuous Proportional-Integral (PI) Speed Control & Hardware Offset Calibration
- * Eliminates seek thrashing and provides seamless, zero-dropout sub-15ms audio synchronization.
+ /**
+ * BeatSync-Pro Authoritative Playback Drift Controller
+ *
+ * The receiver never creates its own independent playback timeline.
+ *
+ * The authoritative timeline is:
+ *
+ *     currentTime
+ *     +
+ *     (synchronizedServerClock - masterTimestamp)
+ *     * playbackRate
+ *
+ * The receiver continuously compares its local media position against
+ * that timeline and corrects small differences with playback-rate
+ * adjustments.
+ *
+ * Large differences are corrected with a controlled hard seek.
  */
 
 class PlaybackSyncController {
@@ -9,59 +22,145 @@ class PlaybackSyncController {
     this.media = mediaElement;
     this.clockSync = clockSync;
 
-    // Enable pitch preservation for seamless micro-rate speed corrections
     this.ensurePitchPreservation();
 
-    // Master timeline reference
+    // =============================================================
+    // AUTHORITATIVE MASTER STATE
+    // =============================================================
+
     this.masterState = {
       sequence: 0,
+
       videoId: null,
       videoUrl: null,
+
+      // Position at masterTimestamp.
       currentTime: 0,
+
       playing: false,
+
       playbackRate: 1.0,
+
+      // Server-authoritative epoch timestamp in milliseconds.
       masterTimestamp: 0,
-      duration: 0
+
+      duration: 0,
+
+      serverTime: 0
     };
 
-    // Tuned Audio Drift Thresholds (in seconds)
-    // Ultra-tight 10ms deadband for zero-echo cinema synchronization
-    this.DRIFT_DEADZONE = 0.010;   // 10ms: inaudible echo boundary, rate = 1.00x
-    this.DRIFT_FINE = 0.120;       // 120ms: continuous PI speed regulation (0.93x - 1.07x)
-    this.DRIFT_MODERATE = 0.350;   // 350ms: moderate continuous catch-up (0.89x - 1.11x)
-    this.DRIFT_RAPID = 0.800;      // 800ms: rapid catch-up (0.84x - 1.16x)
-    this.DRIFT_SEEK = 0.800;       // >= 800ms: hard seek (scrub/large jump only)
+    // =============================================================
+    // DRIFT THRESHOLDS
+    // =============================================================
 
-    // Hardware Latency Calibration Offset (in ms)
-    // Positive offset advances receiver playback to cancel Android/iOS speaker and Bluetooth buffers
-    const savedOffset = localStorage.getItem('beatsync_calibration_offset');
-    this.calibrationOffsetMs = savedOffset !== null ? parseFloat(savedOffset) : 0;
+    // <= 10ms: considered perfectly aligned.
+    this.DRIFT_DEADZONE = 0.010;
 
-    // PI Controller State
-    this.integralError = 0;        // Integral accumulator to eliminate steady-state offset
+    // <= 120ms: fine PI correction.
+    this.DRIFT_FINE = 0.120;
+
+    // <= 350ms: stronger rate correction.
+    this.DRIFT_MODERATE = 0.350;
+
+    // 350ms - 800ms: aggressive rate correction.
+    this.DRIFT_RAPID = 0.800;
+
+    // >= 800ms: controlled hard seek.
+    this.DRIFT_SEEK = 0.800;
+
+    // =============================================================
+    // RATE LIMITS
+    // =============================================================
+
+    this.MIN_RATE_MULTIPLIER = 0.84;
+    this.MAX_RATE_MULTIPLIER = 1.16;
+
+    // =============================================================
+    // HARDWARE CALIBRATION
+    // =============================================================
+
+    let savedOffset = 0;
+
+    try {
+      const stored =
+        localStorage.getItem(
+          "beatsync_calibration_offset"
+        );
+
+      if (stored !== null) {
+        const parsed = parseFloat(stored);
+
+        if (Number.isFinite(parsed)) {
+          savedOffset = parsed;
+        }
+      }
+    } catch (error) {
+      console.warn(
+        "[SyncController] Unable to read calibration:",
+        error
+      );
+    }
+
+    this.calibrationOffsetMs =
+      savedOffset;
+
+    // =============================================================
+    // CONTROLLER STATE
+    // =============================================================
+
+    this.integralError = 0;
+
     this.lastDriftMs = 0;
-    this.smoothedDriftMs = 0;      // Low-pass filtered drift for stable telemetry
+
+    this.smoothedDriftMs = 0;
+
     this.isSeekingLocally = false;
+
     this.seekCooldownUntil = 0;
+
     this.scheduledPlayTimer = null;
+
     this.checkInterval = null;
+
     this.onTelemetryUpdate = null;
+
+    this.lastExpectedTime = 0;
+
+    this.lastEvaluationTime = 0;
   }
 
+  // ===============================================================
+  // MEDIA / AUDIO
+  // ===============================================================
+
   ensurePitchPreservation() {
-    if (!this.media) return;
+    if (!this.media) {
+      return;
+    }
+
     try {
-      if ('preservesPitch' in this.media) {
+      if (
+        "preservesPitch"
+        in this.media
+      ) {
         this.media.preservesPitch = true;
       }
-      if ('webkitPreservesPitch' in this.media) {
+
+      if (
+        "webkitPreservesPitch"
+        in this.media
+      ) {
         this.media.webkitPreservesPitch = true;
       }
-      if ('mozPreservesPitch' in this.media) {
+
+      if (
+        "mozPreservesPitch"
+        in this.media
+      ) {
         this.media.mozPreservesPitch = true;
       }
-    } catch (e) {
-      // Ignore unsupported browsers
+    } catch (error) {
+      // Unsupported browser property.
     }
   }
 
@@ -70,375 +169,1456 @@ class PlaybackSyncController {
     this.ensurePitchPreservation();
   }
 
+  // ===============================================================
+  // CALIBRATION
+  // ===============================================================
+
   setCalibrationOffset(offsetMs) {
-    this.calibrationOffsetMs = Number(offsetMs) || 0;
-    this.integralError = 0; // Reset integrator on manual calibration
-    localStorage.setItem('beatsync_calibration_offset', this.calibrationOffsetMs.toString());
-    console.log(`[SyncController] Calibration offset set to ${this.calibrationOffsetMs}ms`);
+    const value =
+      Number(offsetMs);
+
+    this.calibrationOffsetMs =
+      Number.isFinite(value)
+        ? value
+        : 0;
+
+    this.integralError = 0;
+
+    try {
+      localStorage.setItem(
+        "beatsync_calibration_offset",
+        String(this.calibrationOffsetMs)
+      );
+    } catch (error) {
+      console.warn(
+        "[SyncController] Unable to save calibration:",
+        error
+      );
+    }
+
+    console.log(
+      `[SyncController] Calibration offset set to ${this.calibrationOffsetMs}ms`
+    );
   }
 
   getCalibrationOffset() {
     return this.calibrationOffsetMs;
   }
 
-  /**
-   * Automatically calculates and applies the exact offset needed to snap
-   * the current steady-state drift directly to 0ms (Zero-Echo Sync).
-   */
   autoZeroCalibration() {
-    // Current drift indicates how far ahead (+) or behind (-) local playback is.
-    // To make drift 0: newOffset = currentOffset - currentDrift
-    const currentDrift = this.lastDriftMs;
-    const newOffset = Math.round(this.calibrationOffsetMs - currentDrift);
-    this.setCalibrationOffset(newOffset);
+    const currentDrift =
+      this.lastDriftMs;
+
+    const newOffset = Math.round(
+      this.calibrationOffsetMs -
+      currentDrift
+    );
+
+    this.setCalibrationOffset(
+      newOffset
+    );
+
     this.integralError = 0;
+
     return newOffset;
   }
 
+  // ===============================================================
+  // LIFECYCLE
+  // ===============================================================
+
   start() {
-    if (this.checkInterval) clearInterval(this.checkInterval);
-    // Drift check loop running every 100ms for rapid, responsive continuous speed regulation
-    this.checkInterval = setInterval(() => {
-      this.evaluateDrift();
-    }, 100);
+    this.stop();
+
+    this.lastEvaluationTime =
+      performance.now();
+
+    this.checkInterval =
+      setInterval(() => {
+        this.evaluateDrift();
+      }, 100);
   }
 
   stop() {
     if (this.checkInterval) {
-      clearInterval(this.checkInterval);
+      clearInterval(
+        this.checkInterval
+      );
+
       this.checkInterval = null;
     }
+
     if (this.scheduledPlayTimer) {
-      clearTimeout(this.scheduledPlayTimer);
+      clearTimeout(
+        this.scheduledPlayTimer
+      );
+
       this.scheduledPlayTimer = null;
     }
   }
 
+  // ===============================================================
+  // EXPECTED MASTER POSITION
+  // ===============================================================
+
   /**
-   * Computes expected master playback time in seconds, factoring in:
-   * 1. Authoritative NTP master clock elapsed time
-   * 2. Master playback speed rate
-   * 3. Hardware speaker output delay calibration offset
+   * Calculate where the receiver should currently be.
+   *
+   * Important:
+   *
+   * calibrationOffsetMs is used only as a physical output-latency
+   * compensation. It must NOT modify the server's masterTimestamp.
+   *
+   * Therefore:
+   *
+   * master timeline:
+   *
+   *     currentTime
+   *       +
+   *     elapsed * playbackRate
+   *
+   * hardware compensation:
+   *
+   *     expected + calibrationOffset
    */
+
   getExpectedMasterTime() {
-    if (!this.masterState.playing) {
-      return this.masterState.currentTime;
+    const state =
+      this.masterState;
+
+    if (!state.playing) {
+      return this.clampTime(
+        state.currentTime
+      );
     }
 
-    const currentMasterClock = this.clockSync.now();
-    // If masterTimestamp is scheduled in future (startAt), wait at start position
-    if (currentMasterClock < this.masterState.masterTimestamp) {
-      return this.masterState.currentTime;
+    if (
+      !Number.isFinite(
+        state.masterTimestamp
+      )
+    ) {
+      return this.clampTime(
+        state.currentTime
+      );
     }
 
-    const elapsedSeconds = (currentMasterClock - this.masterState.masterTimestamp) / 1000.0;
-    // Add calibration offset (converted to seconds) so the audio is emitted at the physical speaker in sync
-    const effectiveElapsed = elapsedSeconds + (this.calibrationOffsetMs / 1000.0);
-    const projected = this.masterState.currentTime + (effectiveElapsed * this.masterState.playbackRate);
+    const currentMasterClock =
+      this.clockSync.now();
 
-    if (this.masterState.duration > 0 && projected > this.masterState.duration) {
-      return this.masterState.duration;
+    // -------------------------------------------------------------
+    // Scheduled future start
+    // -------------------------------------------------------------
+
+    if (
+      currentMasterClock <
+      state.masterTimestamp
+    ) {
+      return this.clampTime(
+        state.currentTime
+      );
     }
-    return Math.max(0, projected);
+
+    const elapsedSeconds =
+      (
+        currentMasterClock -
+        state.masterTimestamp
+      ) / 1000.0;
+
+    let projected =
+      state.currentTime +
+      (
+        elapsedSeconds *
+        state.playbackRate
+      );
+
+    // -------------------------------------------------------------
+    // Hardware output latency compensation
+    // -------------------------------------------------------------
+
+    projected +=
+      this.calibrationOffsetMs /
+      1000.0;
+
+    return this.clampTime(
+      projected
+    );
   }
 
-  /**
-   * Safe playback rate setter ensuring preservesPitch is never dropped by the browser.
-   */
+  clampTime(value) {
+    let result =
+      Number(value);
+
+    if (!Number.isFinite(result)) {
+      result = 0;
+    }
+
+    result = Math.max(
+      0,
+      result
+    );
+
+    if (
+      this.masterState.duration > 0
+    ) {
+      result = Math.min(
+        result,
+        this.masterState.duration
+      );
+    }
+
+    return result;
+  }
+
+  // ===============================================================
+  // PLAYBACK RATE
+  // ===============================================================
+
   applyPlaybackRate(targetRate) {
-    if (!this.media) return;
+    if (!this.media) {
+      return;
+    }
+
     this.ensurePitchPreservation();
-    if (Math.abs(this.media.playbackRate - targetRate) > 0.003) {
-      this.media.playbackRate = targetRate;
+
+    let rate =
+      Number(targetRate);
+
+    if (!Number.isFinite(rate)) {
+      rate = 1.0;
+    }
+
+    rate = Math.max(
+      0.25,
+      Math.min(
+        4.0,
+        rate
+      )
+    );
+
+    if (
+      Math.abs(
+        this.media.playbackRate -
+        rate
+      ) > 0.003
+    ) {
+      this.media.playbackRate =
+        rate;
     }
   }
 
-  /**
-   * Evaluates drift and applies continuous proportional-integral (PI) speed adjustment.
-   */
+  // ===============================================================
+  // DRIFT EVALUATION
+  // ===============================================================
+
   evaluateDrift() {
-    if (!this.media || !this.media.src || this.media.readyState < 1) {
+    if (
+      !this.media ||
+      !this.media.src ||
+      this.media.readyState < 1
+    ) {
       return;
     }
 
-    // 1. If master is paused:
-    if (!this.masterState.playing) {
-      if (!this.media.paused) {
-        this.media.pause();
-      }
-      this.integralError = 0;
-      // Keep aligned to master pause position
-      const pauseDiff = Math.abs(this.media.currentTime - this.masterState.currentTime);
-      if (pauseDiff > 0.05 && !this.isSeekingLocally && Date.now() > this.seekCooldownUntil) {
-        this.media.currentTime = this.masterState.currentTime;
-      }
-      this.applyPlaybackRate(1.0);
-      this.lastDriftMs = Math.round((this.media.currentTime - this.masterState.currentTime) * 1000);
-      this.smoothedDriftMs = this.lastDriftMs;
+    // =============================================================
+    // MASTER PAUSED
+    // =============================================================
 
-      if (typeof this.onTelemetryUpdate === 'function') {
-        this.onTelemetryUpdate({
-          driftMs: this.lastDriftMs,
-          expectedTime: this.masterState.currentTime,
-          localTime: this.media.currentTime,
-          playbackRate: 1.0,
-          playing: false,
-          calibrationOffsetMs: this.calibrationOffsetMs
-        });
-      }
+    if (
+      !this.masterState.playing
+    ) {
+      this.handlePausedMaster();
       return;
     }
 
-    // 2. If master is playing:
-    // If currently performing an asynchronous seek or in cooldown, wait for media engine to settle
-    if (this.isSeekingLocally || Date.now() < this.seekCooldownUntil) {
+    // =============================================================
+    // WAIT FOR LOCAL SEEK
+    // =============================================================
+
+    if (
+      this.isSeekingLocally ||
+      Date.now() <
+      this.seekCooldownUntil
+    ) {
       return;
     }
 
-    // If master is playing but local media is paused (and ready), attempt play
-    if (this.media.paused && this.media.readyState >= 2) {
+    // =============================================================
+    // LOCAL MEDIA SHOULD BE PLAYING
+    // =============================================================
+
+    if (
+      this.media.paused &&
+      this.media.readyState >= 2
+    ) {
       this.executePlay();
     }
 
-    const expected = this.getExpectedMasterTime();
-    const local = this.media.currentTime;
-    const driftSec = local - expected;
-    const instantDriftMs = Math.round(driftSec * 1000);
-    this.lastDriftMs = instantDriftMs;
+    // =============================================================
+    // EXPECTED / LOCAL POSITION
+    // =============================================================
 
-    // Smooth drift with a fast exponential moving average (alpha = 0.4) for telemetry stability
-    this.smoothedDriftMs = Math.round((this.smoothedDriftMs * 0.6) + (instantDriftMs * 0.4));
+    const expected =
+      this.getExpectedMasterTime();
 
-    const absDrift = Math.abs(driftSec);
-    const masterRate = this.masterState.playbackRate || 1.0;
-    let targetRate = masterRate;
+    const local =
+      this.media.currentTime;
 
-    // Accumulate integral error in close/moderate tracking zones to eliminate steady-state offsets
-    if (absDrift <= this.DRIFT_MODERATE) {
-      this.integralError += (driftSec * 0.10); // dt = 100ms = 0.10s
-      // Anti-windup clamping to prevent overshoot
-      this.integralError = Math.max(-0.08, Math.min(0.08, this.integralError));
+    const driftSec =
+      local - expected;
+
+    const instantDriftMs =
+      Math.round(
+        driftSec * 1000
+      );
+
+    this.lastExpectedTime =
+      expected;
+
+    this.lastDriftMs =
+      instantDriftMs;
+
+    // =============================================================
+    // SMOOTH TELEMETRY
+    // =============================================================
+
+    this.smoothedDriftMs =
+      Math.round(
+        (
+          this.smoothedDriftMs * 0.60
+        ) +
+        (
+          instantDriftMs * 0.40
+        )
+      );
+
+    const absDrift =
+      Math.abs(driftSec);
+
+    const masterRate =
+      Number(
+        this.masterState.playbackRate
+      ) || 1.0;
+
+    let targetRate =
+      masterRate;
+
+    // =============================================================
+    // PI INTEGRAL
+    // =============================================================
+
+    if (
+      absDrift <=
+      this.DRIFT_MODERATE
+    ) {
+      this.integralError +=
+        driftSec * 0.10;
+
+      this.integralError =
+        Math.max(
+          -0.08,
+          Math.min(
+            0.08,
+            this.integralError
+          )
+        );
     } else {
       this.integralError = 0;
     }
 
-    // Tier 1: Perfect Alignment (<= 10ms) - Inaudible echo threshold
-    if (absDrift <= this.DRIFT_DEADZONE) {
-      targetRate = masterRate;
-      this.integralError *= 0.90; // Gently decay integral error in deadzone
+    // =============================================================
+    // TIER 1: PERFECT
+    // =============================================================
+
+    if (
+      absDrift <=
+      this.DRIFT_DEADZONE
+    ) {
+      targetRate =
+        masterRate;
+
+      this.integralError *=
+        0.90;
     }
-    // Tier 2: Continuous Proportional-Integral (PI) Fine Tracking (10ms - 120ms)
-    // Continuously scales rate with drift error:
-    // At -60ms: rate = 1.0 + (0.060 * 0.85) = ~1.051x (+5.1%)
-    // Closes 60ms gap in ~1.1 seconds smoothly with ZERO dropouts, then gently returns to 1.000x!
-    else if (absDrift <= this.DRIFT_FINE) {
-      const Kp = 0.85; // Proportional gain
-      const Ki = 0.25; // Integral gain
-      const correction = (-driftSec * Kp) - (this.integralError * Ki);
-      const clampedCorrection = Math.max(-0.075, Math.min(0.075, correction));
-      targetRate = masterRate * (1.0 + clampedCorrection);
+
+    // =============================================================
+    // TIER 2: FINE PI CORRECTION
+    // =============================================================
+
+    else if (
+      absDrift <=
+      this.DRIFT_FINE
+    ) {
+      const Kp = 0.85;
+      const Ki = 0.25;
+
+      const correction =
+        (
+          -driftSec * Kp
+        ) -
+        (
+          this.integralError *
+          Ki
+        );
+
+      const clampedCorrection =
+        Math.max(
+          -0.075,
+          Math.min(
+            0.075,
+            correction
+          )
+        );
+
+      targetRate =
+        masterRate *
+        (
+          1.0 +
+          clampedCorrection
+        );
     }
-    // Tier 3: Moderate Catch-Up (120ms - 350ms)
-    // Smooth continuous catch-up (+10% / -10%) WITHOUT SEEKING!
-    else if (absDrift <= this.DRIFT_MODERATE) {
+
+    // =============================================================
+    // TIER 3: MODERATE CORRECTION
+    // =============================================================
+
+    else if (
+      absDrift <=
+      this.DRIFT_MODERATE
+    ) {
       const Kp = 0.40;
-      const correction = Math.max(-0.11, Math.min(0.11, -driftSec * Kp));
-      targetRate = masterRate * (1.0 + correction);
+
+      const correction =
+        Math.max(
+          -0.11,
+          Math.min(
+            0.11,
+            -driftSec * Kp
+          )
+        );
+
+      targetRate =
+        masterRate *
+        (
+          1.0 +
+          correction
+        );
     }
-    // Tier 4: High Desync (350ms - 800ms)
-    // Rapid continuous catch-up (+16% / -16%)
-    else if (absDrift < this.DRIFT_SEEK) {
+
+    // =============================================================
+    // TIER 4: RAPID CORRECTION
+    // =============================================================
+
+    else if (
+      absDrift <
+      this.DRIFT_RAPID
+    ) {
       if (driftSec < 0) {
-        targetRate = masterRate * 1.16;
+        // Receiver is behind.
+        targetRate =
+          masterRate *
+          1.16;
       } else {
-        targetRate = masterRate * 0.84;
+        // Receiver is ahead.
+        targetRate =
+          masterRate *
+          0.84;
       }
     }
-    // Tier 5: Major jump or scrub (>= 800ms) -> Hard Seek
-    // Only used for scrubbing or chapter skips! Uses one-time seeked listener with cooldown.
+
+    // =============================================================
+    // TIER 5: HARD RESYNC
+    // =============================================================
+
     else {
-      this.executeHardSeek(expected);
+      this.executeHardSeek(
+        expected
+      );
+
       this.integralError = 0;
+
+      return;
     }
 
-    this.applyPlaybackRate(targetRate);
+    // -------------------------------------------------------------
+    // Clamp target rate.
+    // -------------------------------------------------------------
 
-    // Telemetry callback
-    if (typeof this.onTelemetryUpdate === 'function') {
-      this.onTelemetryUpdate({
-        driftMs: this.lastDriftMs,
-        expectedTime: expected,
-        localTime: local,
-        playbackRate: this.media.playbackRate,
-        playing: !this.media.paused,
-        calibrationOffsetMs: this.calibrationOffsetMs
-      });
-    }
+    const minRate =
+      masterRate *
+      this.MIN_RATE_MULTIPLIER;
+
+    const maxRate =
+      masterRate *
+      this.MAX_RATE_MULTIPLIER;
+
+    targetRate =
+      Math.max(
+        minRate,
+        Math.min(
+          maxRate,
+          targetRate
+        )
+      );
+
+    this.applyPlaybackRate(
+      targetRate
+    );
+
+    this.emitTelemetry(
+      expected
+    );
   }
 
-  /**
-   * Executes a hard seek safely with cooldown and seeked event listening
-   * to prevent mobile browsers from entering seek-buffering loops.
-   */
-  executeHardSeek(targetPosition) {
-    if (this.isSeekingLocally) return;
+  // ===============================================================
+  // PAUSED MASTER
+  // ===============================================================
 
-    this.isSeekingLocally = true;
-    this.seekCooldownUntil = Date.now() + 800; // 800ms grace period after seek
+  handlePausedMaster() {
+    if (!this.media) {
+      return;
+    }
+
+    if (!this.media.paused) {
+      this.media.pause();
+    }
+
+    this.integralError = 0;
+
+    const target =
+      this.clampTime(
+        this.masterState.currentTime
+      );
+
+    const pauseDiff =
+      Math.abs(
+        this.media.currentTime -
+        target
+      );
+
+    if (
+      pauseDiff > 0.05 &&
+      !this.isSeekingLocally &&
+      Date.now() >
+        this.seekCooldownUntil
+    ) {
+      try {
+        this.media.currentTime =
+          target;
+      } catch (error) {
+        console.warn(
+          "[SyncController] Pause alignment failed:",
+          error
+        );
+      }
+    }
+
+    this.applyPlaybackRate(
+      1.0
+    );
+
+    this.lastDriftMs =
+      Math.round(
+        (
+          this.media.currentTime -
+          target
+        ) * 1000
+      );
+
+    this.smoothedDriftMs =
+      this.lastDriftMs;
+
+    this.emitTelemetry(
+      target,
+      false
+    );
+  }
+
+  // ===============================================================
+  // TELEMETRY
+  // ===============================================================
+
+  emitTelemetry(
+    expectedTime,
+    playing = !this.media.paused
+  ) {
+    if (
+      typeof this.onTelemetryUpdate !==
+      "function"
+    ) {
+      return;
+    }
+
+    this.onTelemetryUpdate({
+      driftMs:
+        this.lastDriftMs,
+
+      expectedTime:
+        expectedTime,
+
+      localTime:
+        this.media.currentTime,
+
+      playbackRate:
+        this.media.playbackRate,
+
+      playing:
+        playing,
+
+      calibrationOffsetMs:
+        this.calibrationOffsetMs
+    });
+  }
+
+  // ===============================================================
+  // HARD SEEK
+  // ===============================================================
+
+  executeHardSeek(
+    targetPosition
+  ) {
+    if (
+      !this.media ||
+      this.isSeekingLocally
+    ) {
+      return;
+    }
+
+    const target =
+      this.clampTime(
+        targetPosition
+      );
+
+    this.isSeekingLocally =
+      true;
+
+    this.seekCooldownUntil =
+      Date.now() + 800;
 
     const onSeeked = () => {
-      this.media.removeEventListener('seeked', onSeeked);
-      this.isSeekingLocally = false;
-      this.applyPlaybackRate(this.masterState.playbackRate);
+      this.media.removeEventListener(
+        "seeked",
+        onSeeked
+      );
+
+      this.isSeekingLocally =
+        false;
+
+      this.applyPlaybackRate(
+        this.masterState.playbackRate
+      );
+
+      this.lastDriftMs = 0;
+
+      this.integralError = 0;
     };
 
-    this.media.addEventListener('seeked', onSeeked, { once: true });
-    this.media.currentTime = targetPosition;
+    this.media.addEventListener(
+      "seeked",
+      onSeeked,
+      {
+        once: true
+      }
+    );
 
-    // Safety timeout in case seeked event doesn't fire
+    try {
+      this.media.currentTime =
+        target;
+    } catch (error) {
+      this.isSeekingLocally =
+        false;
+
+      console.warn(
+        "[SyncController] Hard seek failed:",
+        error
+      );
+    }
+
     setTimeout(() => {
-      if (this.isSeekingLocally) {
-        this.isSeekingLocally = false;
-        this.applyPlaybackRate(this.masterState.playbackRate);
+      if (
+        this.isSeekingLocally
+      ) {
+        this.isSeekingLocally =
+          false;
+
+        this.applyPlaybackRate(
+          this.masterState.playbackRate
+        );
       }
     }, 1200);
   }
 
-  /**
-   * Handle incoming master sync state.
-   */
-  onSyncMessage(msg) {
-    if (msg.sequence && msg.sequence < this.masterState.sequence) {
+  // ===============================================================
+  // SEQUENCE VALIDATION
+  // ===============================================================
+
+  isStaleSequence(sequence) {
+    if (
+      sequence === undefined ||
+      sequence === null
+    ) {
+      return false;
+    }
+
+    const incoming =
+      Number(sequence);
+
+    if (!Number.isFinite(incoming)) {
+      return false;
+    }
+
+    return (
+      incoming <
+      this.masterState.sequence
+    );
+  }
+
+  updateSequence(sequence) {
+    if (
+      sequence === undefined ||
+      sequence === null
+    ) {
       return;
     }
 
-    this.masterState.sequence = msg.sequence || this.masterState.sequence;
-    this.masterState.currentTime = msg.currentTime !== undefined ? msg.currentTime : this.masterState.currentTime;
-    this.masterState.playing = msg.playing !== undefined ? msg.playing : this.masterState.playing;
-    this.masterState.playbackRate = msg.playbackRate || 1.0;
-    this.masterState.masterTimestamp = msg.masterTimestamp || msg.serverTime || this.clockSync.now();
-    if (msg.duration) this.masterState.duration = msg.duration;
-    if (msg.videoId) this.masterState.videoId = msg.videoId;
-    if (msg.videoUrl) this.masterState.videoUrl = msg.videoUrl;
+    const value =
+      Number(sequence);
 
-    // Apply immediate pause alignment
-    if (!this.masterState.playing) {
-      if (!this.media.paused) this.media.pause();
-      if (Math.abs(this.media.currentTime - this.masterState.currentTime) > 0.05 && Date.now() > this.seekCooldownUntil) {
-        this.media.currentTime = this.masterState.currentTime;
-      }
-      this.lastDriftMs = 0;
-      this.integralError = 0;
+    if (
+      Number.isFinite(value)
+    ) {
+      this.masterState.sequence =
+        value;
     }
   }
 
-  /**
-   * Handle scheduled play command with generous scheduling window.
-   */
+  // ===============================================================
+  // GENERIC SYNC MESSAGE
+  // ===============================================================
+
+  onSyncMessage(msg) {
+    if (!msg) {
+      return;
+    }
+
+    if (
+      this.isStaleSequence(
+        msg.sequence
+      )
+    ) {
+      return;
+    }
+
+    this.updateSequence(
+      msg.sequence
+    );
+
+    // -------------------------------------------------------------
+    // Anchor position
+    // -------------------------------------------------------------
+
+    if (
+      msg.currentTime !== undefined
+    ) {
+      const currentTime =
+        Number(
+          msg.currentTime
+        );
+
+      if (
+        Number.isFinite(
+          currentTime
+        )
+      ) {
+        this.masterState.currentTime =
+          this.clampIncomingTime(
+            currentTime
+          );
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Playing state
+    // -------------------------------------------------------------
+
+    if (
+      msg.playing !== undefined
+    ) {
+      this.masterState.playing =
+        Boolean(
+          msg.playing
+        );
+    }
+
+    // -------------------------------------------------------------
+    // Playback rate
+    // -------------------------------------------------------------
+
+    if (
+      msg.playbackRate !== undefined
+    ) {
+      const rate =
+        Number(
+          msg.playbackRate
+        );
+
+      if (
+        Number.isFinite(rate) &&
+        rate > 0
+      ) {
+        this.masterState.playbackRate =
+          rate;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // IMPORTANT:
+    //
+    // Always use server-provided masterTimestamp.
+    //
+    // Never replace it with clockSync.now() if a valid timestamp
+    // exists.
+    // -------------------------------------------------------------
+
+    if (
+      msg.masterTimestamp !== undefined
+    ) {
+      const timestamp =
+        Number(
+          msg.masterTimestamp
+        );
+
+      if (
+        Number.isFinite(timestamp) &&
+        timestamp > 0
+      ) {
+        this.masterState.masterTimestamp =
+          timestamp;
+      }
+    }
+    else if (
+      msg.serverTime !== undefined
+    ) {
+      const serverTime =
+        Number(
+          msg.serverTime
+        );
+
+      if (
+        Number.isFinite(serverTime) &&
+        serverTime > 0
+      ) {
+        this.masterState.masterTimestamp =
+          serverTime;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Server time telemetry
+    // -------------------------------------------------------------
+
+    if (
+      msg.serverTime !== undefined
+    ) {
+      const serverTime =
+        Number(
+          msg.serverTime
+        );
+
+      if (
+        Number.isFinite(serverTime)
+      ) {
+        this.masterState.serverTime =
+          serverTime;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Duration
+    // -------------------------------------------------------------
+
+    if (
+      msg.duration !== undefined
+    ) {
+      const duration =
+        Number(
+          msg.duration
+        );
+
+      if (
+        Number.isFinite(duration) &&
+        duration >= 0
+      ) {
+        this.masterState.duration =
+          duration;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Video metadata
+    // -------------------------------------------------------------
+
+    if (
+      msg.videoId !== undefined
+    ) {
+      this.masterState.videoId =
+        msg.videoId;
+    }
+
+    if (
+      msg.videoUrl !== undefined
+    ) {
+      this.masterState.videoUrl =
+        msg.videoUrl;
+    }
+
+    // -------------------------------------------------------------
+    // Immediate paused alignment
+    // -------------------------------------------------------------
+
+    if (
+      !this.masterState.playing
+    ) {
+      this.handlePausedMaster();
+    }
+  }
+
+  // ===============================================================
+  // PLAY COMMAND
+  // ===============================================================
+
   onPlayCommand(msg) {
-    if (msg.sequence && msg.sequence < this.masterState.sequence) return;
-    this.masterState.sequence = msg.sequence || this.masterState.sequence + 1;
-    this.masterState.playing = true;
-    this.masterState.currentTime = msg.position !== undefined ? msg.position : this.masterState.currentTime;
-    this.masterState.playbackRate = msg.playbackRate || 1.0;
-    this.masterState.masterTimestamp = msg.startAt || this.clockSync.now();
+    if (!msg) {
+      return;
+    }
+
+    if (
+      this.isStaleSequence(
+        msg.sequence
+      )
+    ) {
+      return;
+    }
+
+    this.updateSequence(
+      msg.sequence
+    );
+
+    // -------------------------------------------------------------
+    // Position
+    // -------------------------------------------------------------
+
+    if (
+      msg.position !== undefined
+    ) {
+      const position =
+        Number(
+          msg.position
+        );
+
+      if (
+        Number.isFinite(position)
+      ) {
+        this.masterState.currentTime =
+          this.clampIncomingTime(
+            position
+          );
+      }
+    }
+    else if (
+      msg.currentTime !== undefined
+    ) {
+      const position =
+        Number(
+          msg.currentTime
+        );
+
+      if (
+        Number.isFinite(position)
+      ) {
+        this.masterState.currentTime =
+          this.clampIncomingTime(
+            position
+          );
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Playback rate
+    // -------------------------------------------------------------
+
+    if (
+      msg.playbackRate !== undefined
+    ) {
+      const rate =
+        Number(
+          msg.playbackRate
+        );
+
+      if (
+        Number.isFinite(rate) &&
+        rate > 0
+      ) {
+        this.masterState.playbackRate =
+          rate;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Authoritative start timestamp
+    // -------------------------------------------------------------
+
+    const startTimestamp =
+      msg.startAt !== undefined
+        ? Number(msg.startAt)
+        : Number(msg.masterTimestamp);
+
+    if (
+      Number.isFinite(
+        startTimestamp
+      ) &&
+      startTimestamp > 0
+    ) {
+      this.masterState.masterTimestamp =
+        startTimestamp;
+    }
+
+    this.masterState.playing =
+      true;
+
     this.integralError = 0;
 
-    if (this.scheduledPlayTimer) {
-      clearTimeout(this.scheduledPlayTimer);
-      this.scheduledPlayTimer = null;
+    // -------------------------------------------------------------
+    // Cancel old scheduled start
+    // -------------------------------------------------------------
+
+    if (
+      this.scheduledPlayTimer
+    ) {
+      clearTimeout(
+        this.scheduledPlayTimer
+      );
+
+      this.scheduledPlayTimer =
+        null;
     }
 
-    // Pre-seek audio to start position if not already aligned
-    if (msg.position !== undefined && Math.abs(this.media.currentTime - msg.position) > 0.1) {
-      this.media.currentTime = msg.position;
+    // -------------------------------------------------------------
+    // Pre-position receiver
+    // -------------------------------------------------------------
+
+    const startPosition =
+      this.masterState.currentTime;
+
+    if (
+      Number.isFinite(
+        startPosition
+      ) &&
+      Math.abs(
+        this.media.currentTime -
+        startPosition
+      ) > 0.10
+    ) {
+      try {
+        this.media.currentTime =
+          startPosition;
+      } catch (error) {
+        console.warn(
+          "[SyncController] Unable to pre-position media:",
+          error
+        );
+      }
     }
 
-    const currentClock = this.clockSync.now();
-    const delayMs = (msg.startAt || currentClock) - currentClock;
+    // -------------------------------------------------------------
+    // Calculate delay using synchronized server clock
+    // -------------------------------------------------------------
 
-    if (delayMs > 5) {
-      this.scheduledPlayTimer = setTimeout(() => {
-        this.executePlay();
-      }, delayMs);
-    } else {
+    const currentClock =
+      this.clockSync.now();
+
+    const delayMs =
+      this.masterState.masterTimestamp -
+      currentClock;
+
+    if (
+      delayMs > 5
+    ) {
+      this.scheduledPlayTimer =
+        setTimeout(() => {
+          this.scheduledPlayTimer =
+            null;
+
+          this.executePlay();
+        }, delayMs);
+    }
+    else {
       this.executePlay();
     }
   }
 
+  // ===============================================================
+  // EXECUTE PLAY
+  // ===============================================================
+
   executePlay() {
-    const expected = this.getExpectedMasterTime();
-    // Only pre-align if offset is large (> 250ms) to avoid seek stutters on play
-    if (Math.abs(this.media.currentTime - expected) > 0.25) {
-      this.media.currentTime = expected;
+    if (!this.media) {
+      return;
     }
-    this.applyPlaybackRate(this.masterState.playbackRate);
-    const playPromise = this.media.play();
-    if (playPromise !== undefined) {
-      playPromise.catch(err => {
-        console.warn("[SyncController] Autoplay waiting for unlock:", err);
-      });
+
+    const expected =
+      this.getExpectedMasterTime();
+
+    // Only perform an immediate alignment when the error is large.
+    if (
+      Math.abs(
+        this.media.currentTime -
+        expected
+      ) > 0.25
+    ) {
+      try {
+        this.media.currentTime =
+          expected;
+      } catch (error) {
+        console.warn(
+          "[SyncController] Play alignment failed:",
+          error
+        );
+      }
+    }
+
+    this.applyPlaybackRate(
+      this.masterState.playbackRate
+    );
+
+    const playPromise =
+      this.media.play();
+
+    if (
+      playPromise !== undefined
+    ) {
+      playPromise.catch(
+        (error) => {
+          console.warn(
+            "[SyncController] Playback waiting for user unlock:",
+            error
+          );
+        }
+      );
     }
   }
 
-  /**
-   * Handle pause command.
-   */
+  // ===============================================================
+  // PAUSE COMMAND
+  // ===============================================================
+
   onPauseCommand(msg) {
-    if (this.scheduledPlayTimer) {
-      clearTimeout(this.scheduledPlayTimer);
-      this.scheduledPlayTimer = null;
+    if (!msg) {
+      return;
     }
 
-    this.masterState.playing = false;
-    this.integralError = 0;
-    if (msg.position !== undefined) {
-      this.masterState.currentTime = msg.position;
-      this.media.currentTime = msg.position;
+    if (
+      this.isStaleSequence(
+        msg.sequence
+      )
+    ) {
+      return;
     }
-    this.media.pause();
-    this.applyPlaybackRate(1.0);
+
+    this.updateSequence(
+      msg.sequence
+    );
+
+    if (
+      this.scheduledPlayTimer
+    ) {
+      clearTimeout(
+        this.scheduledPlayTimer
+      );
+
+      this.scheduledPlayTimer =
+        null;
+    }
+
+    // -------------------------------------------------------------
+    // Position
+    // -------------------------------------------------------------
+
+    const position =
+      msg.position !== undefined
+        ? Number(msg.position)
+        : Number(msg.currentTime);
+
+    if (
+      Number.isFinite(position)
+    ) {
+      this.masterState.currentTime =
+        this.clampIncomingTime(
+          position
+        );
+    }
+
+    // -------------------------------------------------------------
+    // Authoritative timestamp
+    // -------------------------------------------------------------
+
+    if (
+      msg.masterTimestamp !== undefined
+    ) {
+      const timestamp =
+        Number(
+          msg.masterTimestamp
+        );
+
+      if (
+        Number.isFinite(timestamp) &&
+        timestamp > 0
+      ) {
+        this.masterState.masterTimestamp =
+          timestamp;
+      }
+    }
+
+    this.masterState.playing =
+      false;
+
+    this.integralError = 0;
+
+    // -------------------------------------------------------------
+    // Immediate pause
+    // -------------------------------------------------------------
+
+    try {
+      this.media.pause();
+
+      this.media.currentTime =
+        this.masterState.currentTime;
+    } catch (error) {
+      console.warn(
+        "[SyncController] Pause alignment failed:",
+        error
+      );
+    }
+
+    this.applyPlaybackRate(
+      1.0
+    );
+
     this.lastDriftMs = 0;
 
-    if (typeof this.onTelemetryUpdate === 'function') {
-      this.onTelemetryUpdate({
-        driftMs: 0,
-        expectedTime: this.masterState.currentTime,
-        localTime: this.media.currentTime,
-        playbackRate: 1.0,
-        playing: false,
-        calibrationOffsetMs: this.calibrationOffsetMs
-      });
-    }
+    this.emitTelemetry(
+      this.masterState.currentTime,
+      false
+    );
   }
 
-  /**
-   * Handle seek command.
-   */
+  // ===============================================================
+  // SEEK COMMAND
+  // ===============================================================
+
   onSeekCommand(msg) {
-    if (msg.position !== undefined) {
-      this.masterState.currentTime = msg.position;
-      this.masterState.masterTimestamp = this.clockSync.now();
-      this.executeHardSeek(msg.position);
-      this.lastDriftMs = 0;
-      this.integralError = 0;
+    if (!msg) {
+      return;
+    }
+
+    if (
+      this.isStaleSequence(
+        msg.sequence
+      )
+    ) {
+      return;
+    }
+
+    this.updateSequence(
+      msg.sequence
+    );
+
+    // -------------------------------------------------------------
+    // New authoritative position
+    // -------------------------------------------------------------
+
+    const position =
+      msg.position !== undefined
+        ? Number(msg.position)
+        : Number(msg.currentTime);
+
+    if (
+      !Number.isFinite(position)
+    ) {
+      return;
+    }
+
+    this.masterState.currentTime =
+      this.clampIncomingTime(
+        position
+      );
+
+    // -------------------------------------------------------------
+    // Preserve playing state when provided
+    // -------------------------------------------------------------
+
+    if (
+      msg.playing !== undefined
+    ) {
+      this.masterState.playing =
+        Boolean(
+          msg.playing
+        );
+    }
+
+    // -------------------------------------------------------------
+    // Playback rate
+    // -------------------------------------------------------------
+
+    if (
+      msg.playbackRate !== undefined
+    ) {
+      const rate =
+        Number(
+          msg.playbackRate
+        );
+
+      if (
+        Number.isFinite(rate) &&
+        rate > 0
+      ) {
+        this.masterState.playbackRate =
+          rate;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // CRITICAL:
+    //
+    // Use the server's masterTimestamp.
+    //
+    // Do NOT use:
+    //
+    //     this.clockSync.now()
+    //
+    // when server already supplied an authoritative timestamp.
+    // -------------------------------------------------------------
+
+    if (
+      msg.masterTimestamp !== undefined
+    ) {
+      const timestamp =
+        Number(
+          msg.masterTimestamp
+        );
+
+      if (
+        Number.isFinite(timestamp) &&
+        timestamp > 0
+      ) {
+        this.masterState.masterTimestamp =
+          timestamp;
+      }
+    }
+    else if (
+      msg.serverTime !== undefined
+    ) {
+      const serverTime =
+        Number(
+          msg.serverTime
+        );
+
+      if (
+        Number.isFinite(serverTime) &&
+        serverTime > 0
+      ) {
+        this.masterState.masterTimestamp =
+          serverTime;
+      }
+    }
+    else {
+      // Legacy fallback only.
+      this.masterState.masterTimestamp =
+        this.clockSync.now();
+    }
+
+    this.integralError = 0;
+
+    // -------------------------------------------------------------
+    // Immediate hard alignment
+    // -------------------------------------------------------------
+
+    this.executeHardSeek(
+      this.getExpectedMasterTime()
+    );
+  }
+
+  // ===============================================================
+  // FORCE RESYNC
+  // ===============================================================
+
+  resyncNow() {
+    const expected =
+      this.getExpectedMasterTime();
+
+    this.executeHardSeek(
+      expected
+    );
+
+    this.lastDriftMs = 0;
+
+    this.integralError = 0;
+
+    if (
+      this.masterState.playing &&
+      this.media.paused
+    ) {
+      this.media
+        .play()
+        .catch(() => {});
     }
   }
 
-  /**
-   * Force manual resynchronization.
-   */
-  resyncNow() {
-    const expected = this.getExpectedMasterTime();
-    this.executeHardSeek(expected);
-    this.lastDriftMs = 0;
-    this.integralError = 0;
-    if (this.masterState.playing && this.media.paused) {
-      this.media.play().catch(() => {});
+  // ===============================================================
+  // SAFE INCOMING POSITION
+  // ===============================================================
+
+  clampIncomingTime(
+    value
+  ) {
+    let position =
+      Number(value);
+
+    if (
+      !Number.isFinite(position)
+    ) {
+      position = 0;
     }
+
+    position =
+      Math.max(
+        0,
+        position
+      );
+
+    if (
+      this.masterState.duration > 0
+    ) {
+      position =
+        Math.min(
+          position,
+          this.masterState.duration
+        );
+    }
+
+    return position;
   }
 }
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { PlaybackSyncController };
+
+// =================================================================
+// CommonJS compatibility
+// =================================================================
+
+if (
+  typeof module !== "undefined" &&
+  module.exports
+) {
+  module.exports = {
+    PlaybackSyncController
+  };
 }
